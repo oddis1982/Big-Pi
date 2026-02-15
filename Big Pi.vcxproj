@@ -75,6 +75,7 @@
   <ImportGroup Label="PropertySheets" />
   <PropertyGroup Label="UserMacros" />
   <ItemGroup>
+    <ClCompile Include="apps\pedal_host\main.cpp" />
     <ClCompile Include="App\main.cpp" />
     <ClCompile Include="Source\EarlyReflections.cpp" />
     <ClCompile Include="Source\Modes\ModePresets.cpp" />
@@ -84,8 +85,18 @@
     <ClCompile Include="Source\ReverbCore\Tank.cpp" />
     <ClCompile Include="Source\ReverbCore\TapPatterns.cpp" />
     <ClCompile Include="Source\ReverbEngine.cpp" />
+    <ClCompile Include="src\dsp\diffusion\Diffusion.cpp" />
+    <ClCompile Include="src\dsp\engines\tune_hall\EarlyReflections.cpp" />
+    <ClCompile Include="src\dsp\engines\tune_hall\OutputStage.cpp" />
+    <ClCompile Include="src\dsp\engines\tune_hall\ReverbEngine.cpp" />
+    <ClCompile Include="src\dsp\modes\ModePresets.cpp" />
+    <ClCompile Include="src\dsp\tail\Matrices.cpp" />
+    <ClCompile Include="src\dsp\tail\Tank.cpp" />
+    <ClCompile Include="src\dsp\tail\TapPatterns.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <None Include=".gitattributes" />
+    <None Include=".gitignore" />
     <None Include="Big Pi.slnx" />
   </ItemGroup>
   <ItemGroup>
@@ -100,8 +111,20 @@
     <ClInclude Include="Source\ReverbCore\TapPatterns.h" />
     <ClInclude Include="Source\ReverbEngine.h" />
     <ClInclude Include="Source\Version.h" />
+    <ClInclude Include="src\core\Version.h" />
+    <ClInclude Include="src\dsp\common\Dsp.h" />
+    <ClInclude Include="src\dsp\diffusion\Diffusion.h" />
+    <ClInclude Include="src\dsp\engines\tune_hall\EarlyReflections.h" />
+    <ClInclude Include="src\dsp\engines\tune_hall\OutputStage.h" />
+    <ClInclude Include="src\dsp\engines\tune_hall\ReverbEngine.h" />
+    <ClInclude Include="src\dsp\modes\ModePresets.h" />
+    <ClInclude Include="src\dsp\modes\Modes.h" />
+    <ClInclude Include="src\dsp\tail\Matrices.h" />
+    <ClInclude Include="src\dsp\tail\Tank.h" />
+    <ClInclude Include="src\dsp\tail\TapPatterns.h" />
   </ItemGroup>
   <ItemGroup>
+    <Text Include="CMakeLists.txt" />
     <Text Include="Docs\Manifest.txt" />
     <Text Include="Docs\RoadMap.txt" />
   </ItemGroup>
