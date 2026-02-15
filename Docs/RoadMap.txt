@@ -1,0 +1,378 @@
+﻿Version 1.0
+BIG PI — ROADMAP 1.0
+Complete Development Plan (Updated with MicroCosmos)
+
+PHASE 0 — PLATFORM STABILIZATION (CURRENT STATE)
+
+	Goal:
+		Solid, modular, stable Kappa-level reverb core.
+
+	Completed:
+
+		Modular architecture
+
+		Tank (FDN-like)
+
+		Diffusion (input + late)
+
+		Early Reflections
+
+		Tap Patterns
+
+		Output Stage
+
+		ModePreset system
+
+		Test harness WAV rendering
+
+	Minor Refinements:
+
+		Eliminate runtime allocations in audio path
+
+		Centralized parameter clamping policy
+
+		Deterministic random seeds (diffusion + jitter)
+
+		NaN / runaway protection
+
+		Profiling hooks
+
+		Block-rate smoothing for decay/damping/mod depth
+
+		Improve stereo decorrelation in tap patterns
+
+		Diffusion “age” mapping via tank envelope
+
+	Exit Condition:
+		Clean, stable, professional baseline engine.
+
+PHASE 1 — STAPLE MODES (PRESET REFINEMENT)
+
+		Modes:
+
+			Room
+
+			Hall
+
+			Cathedral
+
+			Plate
+
+			Vintage (PCM-style)
+
+			Sky (Cloud-ish)
+
+	Major Work:
+
+			Unique delay sets per mode
+
+			Per-mode diffusion structure
+
+			Per-mode modulation maps
+
+			Multiband decay tuning
+
+			ER redesign per mode
+
+			OutputStage voicing per mode
+
+	Minor Tweaks:
+
+			Dynamic damping refinement
+
+			Stereo width defaults per mode
+
+			Loudness compensation tuning
+
+	Exit Condition:
+		All staple modes sound coherent and musical.
+
+PHASE 2 — CORE ENGINE QUALITY LIFT
+
+	Additions:
+
+		Parameter smoothing for sensitive parameters
+
+		Dynamic diffusion mapping via tank envelope
+		
+		Optional safety limiter in OutputStage
+
+		Improved predelay filtering
+
+		Enhanced ducking curve
+
+	Technical Improvements:
+
+		Denormal protection
+
+		CPU profiling per mode
+
+		Block-level performance budget
+
+	Exit Condition:
+		Engine feels finished-grade before advanced modes.
+
+PHASE 3 — SPRING MODE (NEW TOPOLOGY)
+
+	New Module:
+		Source/Blocks/SpringModel.*
+
+	Features:
+
+		Series allpass chain
+
+		Bandpass emphasis
+
+		Subtle dispersion
+
+		Drip control
+
+		Optional tank tail blend
+
+	Exit Condition:
+		Convincing spring character.
+
+PHASE 4 — BLOSSOM MODE (BLOOM-INSPIRED)
+
+		New Module:
+			Envelope-driven wet build-up.
+
+	Features:
+
+		Attack-based bloom swell
+
+		Sensitivity control
+
+		Feedback ramp shaping
+
+		Optional dynamic diffusion boost
+
+	Exit Condition:
+		Massive evolving bloom-style reverb.
+
+PHASE 5 — SHIMMER
+
+	New Module:
+		PitchShifter inside feedback path.
+
+	Features:
+
+		+12 / +7 intervals
+
+		Dual interval blending
+
+		Diffused shimmer return
+
+		Brightness damping safety
+
+	Exit Condition:
+		Musical shimmer without harsh artifacts.
+
+PHASE 6 — MAGNETIC (TAPE HYBRID)
+
+	New Module:
+		Multi-head tape delay + smear.
+
+	Features:
+
+		Head spacing presets
+
+		Wow/flutter
+
+		Tape saturation
+
+		Age control
+
+		Optional tail blending
+
+	Exit Condition:
+		Ambient tape-space hybrid mode.
+
+PHASE 7 — GRANULAR MODE
+
+	New Module:
+		GranularEngine
+
+	Features:
+
+		Grain scheduler
+
+		Windowing (Hann)
+
+		Pitch control
+
+		Reverse playback
+
+		Density control
+
+		Freeze
+
+	Exit Condition:
+		Creative granular reinterpretation engine.
+
+PHASE 8 — SINGULARITY (BLACKHOLE-INSPIRED)
+
+	New Module:
+		Warped delay/time scaling engine.
+
+	Features:
+
+		Gravity control
+
+		Time bending
+
+		Extreme modulation
+
+		Reverse-ish smear option
+
+		Long delay scaling
+
+	Exit Condition:
+		Infinite warped ambient mode.
+
+PHASE 9 — MICROCOSMOS MODE (FULLY SPECIFIED)
+
+		Identity:
+			Granular reinterpretation engine that feeds into
+			Big Pi diffusion + tail.
+			Separate engine, not embedded in reverb tank.
+
+		Signal Flow:
+
+			Input
+				↓
+			Capture Buffer (2.0s stereo @ 48kHz)
+				↓
+			Grain Engine (~32 voices)
+				↓
+			Soft Saturation (optional)
+				↓
+			Diffusion Network (reuse existing)
+				↓
+			Space (reuse Tank tail)
+				↓
+			Output
+
+		Capture Buffer:
+			96,000 samples per channel
+			192,000 floats total
+			~768 KB memory
+
+	Grain Model:
+
+		struct Grain
+		{
+		float position;
+		float speed;
+		float length;
+		float age;
+		bool active;
+			};
+
+	MAX_GRAINS = 32
+
+		Grain Processing Per Sample:
+
+		Linear interpolation read
+
+		position += speed
+
+	Hann window:
+		w(t) = 0.5 * (1 - cos(2πt))
+
+		Sum to wet
+
+		age++
+
+		deactivate when age >= length
+
+	Pitch:
+		speed > 1.0 → pitch up
+		speed < 1.0 → pitch down
+		speed < 0 → reverse
+
+	Internal Behaviors:
+
+		Mosaic:
+
+			Random start positions
+
+			Slight pitch variation
+
+			Medium density
+
+		Tunnel:
+
+			Slow grains (<1.0 speed)
+
+			Long grains
+
+			Heavy diffusion
+
+			Drone behavior
+
+		Sequence:
+
+			Grid-triggered grains
+
+			Rhythmic feel
+
+			Future MIDI clock support
+
+	Macro Mapping:
+
+			Decay → Grain length
+			PreDelay → Grain density
+			ModDepth → Random pitch range
+			ModRate → Grain trigger rate
+			Mix → Dry/Wet
+			Tone → Grain low-pass
+			Size → Capture buffer scan range
+
+		MVP Order:
+
+			Capture buffer
+
+			Single grain + Hann window
+
+			Multiple grains + scheduler
+
+			Add sub-modes
+
+			Route through diffusion + tail
+
+PHASE 10 — PRODUCTIZATION
+
+	Parameter abstraction layer
+
+	Preset serialization
+
+	MIDI CC + Program Change
+
+	Tap tempo / clock sync
+
+	Clickless bypass
+
+	Eco vs HQ quality switch
+	
+	Hardware calibration
+
+CONTINUOUS TASKS (ALL PHASES)
+
+	Listening regression WAV renders
+	
+	CPU profiling
+
+	Stability checks
+
+	Parameter safety clamps
+
+	Documentation updates
+
+	Preserve modular separation
+
+CURRENT POSITION
+
+	Phase 0 complete
+	Entering Phase 1 tuning
+	MicroCosmos fully specified, not yet implemented

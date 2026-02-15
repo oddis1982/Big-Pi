@@ -1,0 +1,17 @@
+<Solution>
+  <Configurations>
+    <Platform Name="ARM" />
+    <Platform Name="ARM64" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Folder Name="/App/" />
+  <Folder Name="/Docs/" />
+  <Folder Name="/Source/" />
+  <Folder Name="/Source/Modes/" />
+  <Folder Name="/Source/ReverbCore/" />
+  <Project Path="Big Pi.vcxproj" Id="ddba0753-9e0d-4355-bc5d-d1079003c740">
+    <Platform Solution="*|x86" Project="x86" />
+    <Deploy />
+  </Project>
+</Solution>

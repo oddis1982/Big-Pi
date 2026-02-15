@@ -1,0 +1,253 @@
+﻿# Big Pi — Project Manifest
+Version: Kappa Modular Platform  
+Engine: Algorithmic Reverb (FDN-based)  
+Language: C++17  
+
+---
+
+# 1. Project Overview
+
+Big Pi is a modular, algorithmic reverb engine designed to support:
+
+• Staple modes (Room, Hall, Plate, Cathedral, Vintage, Spring)  
+• Atmospheric modes (Sky, Shimmer-ready, Magnetic-ready, Blossom-ready)  
+• Advanced expansions (Granular, Singularity, MicroCosmic)  
+
+Architecture principles:
+
+✔ Fully modular  
+✔ Real-time safe (no allocations in audio path)  
+✔ Mode-driven configuration  
+✔ Extensible for future feature blocks  
+✔ DSP components isolated from orchestration logic  
+
+---
+
+# 2. Folder Structure
+
+App/
+    main.cpp
+        → Standalone test harness
+        → Generates WAV files for listening tests
+
+Source/
+    Version.h
+        → Build identifier
+
+    ReverbEngine.h
+    ReverbEngine.cpp
+        → Core orchestrator
+        → Connects all DSP modules
+
+    Dsp.h
+        → Core DSP utilities
+        → DelayLine, Allpass, Biquad, LFO, smoothing, etc.
+
+    EarlyReflections.h
+    EarlyReflections.cpp
+        → Multi-tap early reflection generator
+
+    OutputStage.h
+    OutputStage.cpp
+        → Final wet shaping (EQ, width, saturation, level)
+
+    Modes/
+        Modes.h
+        ModePresets.h
+        ModePresets.cpp
+            → Mode enumeration
+            → Mode-specific configuration recipes
+
+    ReverbCore/
+        Diffusion.h
+        Diffusion.cpp
+            → Input + late diffusion allpass chains
+
+        Tank.h
+        Tank.cpp
+            → FDN-style late reverb core
+            → Multiband decay
+            → Modulation + jitter
+            → Saturation
+            → Dynamic damping
+
+        TapPatterns.h
+        TapPatterns.cpp
+            → Stereo rendering from tank delay lines
+
+        Matrices.h
+        Matrices.cpp
+            → Hadamard and Householder mixing
+
+Docs/
+    MANIFEST.md
+        → This file
+
+---
+
+# 3. Signal Flow
+
+Input (L/R)
+    ↓
+Predelay (stereo delay lines)
+    ↓
+Early Reflections (multi-tap)
+    ↓
+Input Diffusion (allpass chain)
+    ↓
+Mono Injection
+    ↓
+Tank (FDN-like delay network)
+    ↓
+Tap Patterns (stereo reconstruction)
+    ↓
+Late Diffusion (optional refinement)
+    ↓
+Output Stage (EQ, width, saturation)
+    ↓
+Dry/Wet Mix
+    ↓
+Output (L/R)
+
+---
+
+# 4. Core Modules Explained
+
+## 4.1 Tank
+
+Implements:
+
+• 8 or 16 delay lines  
+• Matrix mixing (Hadamard / Householder)  
+• Fractional delay modulation (LFO + jitter)  
+• Multiband decay shaping  
+• Per-line HP + LP feedback filtering  
+• Optional saturation  
+• Envelope tracking for tail energy  
+
+This is the heart of Big Pi.
+
+---
+
+## 4.2 Diffusion
+
+Two layers:
+
+• Input diffusion (densifies injection)  
+• Late diffusion refinement (smooths tail texture)  
+
+Based on cascaded allpass filters.
+
+---
+
+## 4.3 TapPatterns
+
+Converts the internal tank vector `y[i]` into stereo wet output.
+
+Different patterns change:
+
+• Width
+• Perceived density
+• Stereo image stability
+
+---
+
+## 4.4 OutputStage
+
+Final polish stage:
+
+• High-pass filtering
+• Low/high shelves
+• Mid/Side width
+• Soft saturation
+• Level control
+
+---
+
+# 5. Stability Guarantees
+
+The engine clamps:
+
+• Decay values
+• Saturation drive
+• Multiband multipliers
+• Dynamic damping
+• Freeze feedback ceiling
+
+This prevents runaway feedback.
+
+---
+
+# 6. Current Capability Level
+
+The Kappa-level engine supports:
+
+✔ Professional-quality algorithmic reverb  
+✔ Modulated FDN tail  
+✔ Multiband decay coloration  
+✔ Dynamic damping  
+✔ Loudness compensation  
+✔ Ducking  
+✔ Freeze  
+
+It does NOT yet include:
+
+✖ Shimmer pitch shifting  
+✖ Granular slicing  
+✖ Reverse reverb  
+✖ Cloud/particle engines  
+✖ Spectral processing  
+
+Those will be added as separate modular blocks.
+
+---
+
+# 7. How to Build (Console Test Harness)
+
+Build target:
+    App/main.cpp
+
+Produces:
+    big_pi_test.wav
+
+You can audition impulse responses and compare modes.
+
+---
+
+# 8. Future Expansion Plan
+
+Planned modules:
+
+• PitchShifter (for Shimmer mode)
+• GranularEngine
+• ReverseBuffer
+• CloudParticleEngine
+• Magnetic (tape-style delay+reverb hybrid)
+• Bloom (dynamic swell generator)
+
+Each will live in:
+
+Source/Advanced/
+
+To keep ReverbEngine manageable.
+
+---
+
+# 9. Design Philosophy
+
+Big Pi is not a clone.
+
+It is a modular research-grade reverb platform inspired by:
+
+• Classic Lexicon diffusion
+• Eventide large-space topology
+• Modern modulation techniques
+• Psychoacoustic loudness stabilization
+
+Goal:
+A flexible engine capable of covering both
+realistic acoustic spaces and massive cinematic atmospheres.
+
+---
+
+END OF MANIFEST
