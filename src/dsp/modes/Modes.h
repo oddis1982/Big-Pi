@@ -40,8 +40,6 @@
       - Optional feature flags (pitch block, granular block, etc.)
 */
 
-#include <string>
-
 namespace bigpi {
 
     // ============================================================================
@@ -104,7 +102,9 @@ namespace bigpi {
         case Mode::Singularity: return "Singularity";
         case Mode::MicroCosmic: return "MicroCosmic";
 
-        default: return "Unknown";
+        case Mode::Count:       return "Count";
+
+        default:                return "Unknown";
         }
     }
 
@@ -135,4 +135,4 @@ namespace bigpi {
     }
 
 } // namespace bigpi
-#pragma once
+

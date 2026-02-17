@@ -1,32 +1,21 @@
 #include "OutputStage.h"
 
+#include <algorithm> // std::max, std::min
+#include <cmath>     // std::abs
+
 /*
   =============================================================================
   OutputStage.cpp — Big Pi Final Wet Processing (implementation)
   =============================================================================
-
-  This stage happens AFTER:
-    - early reflections
-    - late reverb tank output
-    - (optional) late diffusion refinement
-
-  The goal is "mix-ready wet":
-    - remove rumble (high-pass)
-    - shape tone (shelves)
-    - control stereo width
-    - add gentle saturation (optional)
-    - apply final level
-
-  This stage is intentionally not too fancy:
-    high-end reverbs often keep output shaping simple but well-tuned.
-
-  Real-time safe:
-    - No allocations
-    - Small filters and smoothers only
 */
 
+static inline float killDenorm(float x) {
+    // Prevent denormals (tiny subnormal floats) that can cause CPU spikes
+    return (std::abs(x) < 1e-20f) ? 0.0f : x;
+}
+
 void OutputStage::prepare(float sampleRate) {
-    sr = sampleRate;
+    sr = (sampleRate <= 1.0f) ? 48000.0f : sampleRate;
 
     // Smoothers to prevent clicks when UI changes.
     widthSm.setTimeMs(80.0f, sr);
@@ -55,31 +44,36 @@ void OutputStage::reset() {
 
 void OutputStage::setParams(const Params& p) {
     target = p;
-
-    // Filter coefficients can be updated immediately (safe + small).
     updateFilters();
 }
 
 void OutputStage::updateFilters() {
-    // High-pass: remove low rumble from wet output.
-    // We use a biquad HP for a cleaner cutoff than a one-pole.
-    hpL.setHighPass(target.hpHz, 0.707f, sr);
-    hpR.setHighPass(target.hpHz, 0.707f, sr);
+    // Clamp params to safe ranges.
+    float hpHz = std::max(5.0f, std::min(target.hpHz, 0.49f * sr));
 
-    // Shelves: gentle broad tone shaping.
-    lowL.setLowShelf(target.lowShelfHz, target.lowGainDb, 0.9f, sr);
-    lowR.setLowShelf(target.lowShelfHz, target.lowGainDb, 0.9f, sr);
+    float lowHz = std::max(5.0f, std::min(target.lowShelfHz, 0.49f * sr));
+    float highHz = std::max(5.0f, std::min(target.highShelfHz, 0.49f * sr));
 
-    highL.setHighShelf(target.highShelfHz, target.highGainDb, 0.9f, sr);
-    highR.setHighShelf(target.highShelfHz, target.highGainDb, 0.9f, sr);
+    float lowDb = std::max(-24.0f, std::min(target.lowGainDb, 24.0f));
+    float highDb = std::max(-24.0f, std::min(target.highGainDb, 24.0f));
+
+    // High-pass
+    hpL.setHighPass(hpHz, 0.707f, sr);
+    hpR.setHighPass(hpHz, 0.707f, sr);
+
+    // Shelves
+    lowL.setLowShelf(lowHz, lowDb, 0.9f, sr);
+    lowR.setLowShelf(lowHz, lowDb, 0.9f, sr);
+
+    highL.setHighShelf(highHz, highDb, 0.9f, sr);
+    highR.setHighShelf(highHz, highDb, 0.9f, sr);
 }
 
 void OutputStage::processBlock(float* wetL, float* wetR, int n) {
     if (!prepared) return;
 
     for (int i = 0; i < n; ++i) {
-
-        // Smooth parameters
+        // Smooth parameters (per-sample smoothing prevents zipper noise)
         float width = dsp::clampf(widthSm.process(target.width), 0.0f, 2.5f);
         float drive = dsp::clampf(driveSm.process(target.drive), 0.0f, 6.0f);
         float level = dsp::clampf(levelSm.process(target.level), 0.0f, 2.0f);
@@ -98,7 +92,7 @@ void OutputStage::processBlock(float* wetL, float* wetR, int n) {
         L = highL.process(L);
         R = highR.process(R);
 
-        // 3) Stereo width in Mid/Side domain
+        // 3) Stereo width (Mid/Side)
         float M = 0.5f * (L + R);
         float S = 0.5f * (L - R);
 
@@ -117,7 +111,9 @@ void OutputStage::processBlock(float* wetL, float* wetR, int n) {
         L *= level;
         R *= level;
 
-        wetL[i] = L;
-        wetR[i] = R;
+        // Denormal guard at the end (important for long tails)
+        wetL[i] = killDenorm(L);
+        wetR[i] = killDenorm(R);
     }
 }
+

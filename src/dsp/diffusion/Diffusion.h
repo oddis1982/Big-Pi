@@ -27,21 +27,24 @@
            - add subtle smoothness to the tail
            - reduce flutter / grain from modulation
 
-  Time-varying diffusion (Delta/Kappa concept):
-  --------------------------------------------
+  Time-varying diffusion:
+  -----------------------
   The diffuser coefficient g can change depending on tail "age" or energy.
   This can create more natural build-up:
     - early: less diffusion (preserve articulation)
     - late: more diffusion (dense smooth tail)
 
-  This header defines a Diffusion module that owns its allpass chains and
-  provides a clean API for ReverbEngine/Tank orchestration.
+  Real-time safety:
+  -----------------
+  - init() may allocate (sets up delay buffers)
+  - processInput/processLate must not allocate
 */
 
 #include <array>
 #include <cstdint>
 #include <algorithm>
-#include "../Dsp.h"
+
+#include "dsp/common/Dsp.h"
 
 namespace bigpi::core {
 
@@ -51,16 +54,16 @@ namespace bigpi::core {
         static constexpr int kMaxInputStages = 8;
         static constexpr int kLateStages = 3;
 
-        // --------------------------------------------------------------------------
+        // ----------------------------------------------------------------------
         // Configuration structures
-        // --------------------------------------------------------------------------
+        // ----------------------------------------------------------------------
 
         struct InputConfig {
-            int   stages = 6;      // how many allpasses are active
-            float g = 0.72f;  // allpass coefficient (diffusion strength)
+            int   stages = 6;     // how many allpasses are active (0..kMaxInputStages)
+            float g = 0.72f;      // allpass coefficient (diffusion strength)
 
             // Base delay times in ms for L/R (will be slightly offset for decorrelation)
-            // These are short delays, typically 1..20ms.
+            // These are short delays, typically ~1..20ms.
             std::array<float, kMaxInputStages> timesMsL{};
             std::array<float, kMaxInputStages> timesMsR{};
         };
@@ -74,9 +77,9 @@ namespace bigpi::core {
             std::array<float, kLateStages> timesMsR{};
         };
 
-        // --------------------------------------------------------------------------
+        // ----------------------------------------------------------------------
         // Lifecycle
-        // --------------------------------------------------------------------------
+        // ----------------------------------------------------------------------
 
         Diffusion() = default;
 
@@ -85,34 +88,31 @@ namespace bigpi::core {
           ----------------------
           Allocates allpass buffers and initializes stage delay times.
 
-          - seed ensures L/R delay offsets differ per mode instance if desired.
+          - seed ensures L/R delay offsets differ per instance if desired.
         */
         void init(float sampleRate, uint32_t seed);
 
         // Clears internal state (flushes diffusion memory).
         void clear();
 
-        // --------------------------------------------------------------------------
+        // ----------------------------------------------------------------------
         // Configuration
-        // --------------------------------------------------------------------------
+        // ----------------------------------------------------------------------
 
+        // Safe to call at block-rate (e.g., when knobs change).
         void setInputConfig(const InputConfig& cfg);
         void setLateConfig(const LateConfig& cfg);
 
         // Time-varying diffusion control:
-        // supply a "g" each sample (or per block).
+        // supply a "g" each sample (or per block). Keep this cheap.
         void setTimeVaryingG(float g) { tvG = g; }
         float getTimeVaryingG() const { return tvG; }
 
-        // --------------------------------------------------------------------------
+        // ----------------------------------------------------------------------
         // Processing
-        // --------------------------------------------------------------------------
+        // ----------------------------------------------------------------------
 
-        /*
-          processInput(L, R)
-          ------------------
-          Applies the input diffusion chain in-place.
-        */
+        // Applies the input diffusion chain in-place.
         void processInput(float& L, float& R);
 
         /*
@@ -121,8 +121,6 @@ namespace bigpi::core {
           Applies late diffusion. amount01 crossfades between:
             0 => no late diffusion
             1 => fully late-diffused
-
-          This keeps it subtle and controllable.
         */
         void processLate(float& L, float& R, float amount01);
 
@@ -148,11 +146,13 @@ namespace bigpi::core {
 
         bool inited = false;
 
-        // Helper to clamp stage counts safely
-        static int clampStages(int s) {
+        static int clampInputStages(int s) {
             return std::max(0, std::min(s, kMaxInputStages));
+        }
+
+        static float clamp01(float x) {
+            return std::max(0.0f, std::min(1.0f, x));
         }
     };
 
 } // namespace bigpi::core
-#pragma once

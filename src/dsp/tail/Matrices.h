@@ -20,69 +20,33 @@
   Two classic choices:
     - Hadamard matrix:
         * very diffusive, good at energy spreading
-        * can feel bright/plate-like when tuned that way
     - Householder matrix:
-        * also energy-preserving and diffusive
+        * energy-preserving and diffusive
         * tends to sound slightly “smoother” in many reverbs
-
-  Performance:
-    Both operations here are O(N log N) or O(N) style operations for N=8 or 16,
-    and are perfectly fine for real-time audio.
 */
 
 #include <array>
 #include <algorithm>
-#include <cmath>
 
 namespace bigpi::core {
 
     // We support up to 16 delay lines in HQ mode.
-    static constexpr int kMaxLines = 16;
+    // (C++17 inline constexpr avoids multiple-definition surprises across TUs.)
+    inline constexpr int kMaxLines = 16;
 
     // ============================================================================
     // Hadamard mix
     // ============================================================================
 
-    /*
-      hadamardMix(v, lines)
-      ---------------------
-      Applies an in-place Hadamard transform to the first `lines` elements.
-
-      Property:
-        - For power-of-two sizes (8 or 16), Hadamard is orthogonal up to a scale.
-        - If we scale by 1/sqrt(N), it becomes energy-preserving.
-
-      Why this helps in reverb:
-        - It produces strong diffusion (rapid echo densification).
-    */
+    // Applies an in-place Hadamard transform to the first `lines` elements.
+    // NOTE: Hadamard requires lines to be a power of two (8 or 16 in our project).
     void hadamardMix(std::array<float, kMaxLines>& v, int lines);
 
     // ============================================================================
     // Householder mix
     // ============================================================================
 
-    /*
-      householderMix(v, lines)
-      ------------------------
-      Applies a Householder reflection:
-
-          y = x - 2 * (u^T x) / (u^T u) * u
-
-      For our special case, choose u = [1,1,1,...,1].
-      That makes it:
-
-          mean = sum(x)/N
-          y[i] = x[i] - 2*mean
-
-      This is extremely cheap (just sum + subtract).
-
-      Properties:
-        - Orthogonal (energy-preserving)
-        - Strong mixing effect
-
-      Why this helps:
-        - Similar to Hadamard, but with a different “spread” character.
-    */
+    // Applies a Householder reflection with u = [1,1,...,1].
     void householderMix(std::array<float, kMaxLines>& v, int lines);
 
     // ============================================================================
@@ -95,9 +59,14 @@ namespace bigpi::core {
     };
 
     inline void mix(std::array<float, kMaxLines>& v, int lines, MatrixType type) {
+        // Safety clamp: prevents out-of-range access if caller misconfigures.
+        lines = std::max(0, std::min(lines, kMaxLines));
+
+        if (lines <= 1) return;
+
         if (type == MatrixType::Hadamard) hadamardMix(v, lines);
         else householderMix(v, lines);
     }
 
 } // namespace bigpi::core
-#pragma once
+

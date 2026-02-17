@@ -1,25 +1,11 @@
 #include "TapPatterns.h"
 
+#include <algorithm> // std::min, std::max
+
 /*
   =============================================================================
   TapPatterns.cpp — Big Pi Tank Output Tap Patterns (implementation)
   =============================================================================
-
-  Patterns:
-    We define a few "good sounding" patterns that combine delay-line outputs.
-
-  Goals:
-    - Create decorrelated stereo (L and R not identical)
-    - Avoid too much cancellation (keep energy stable)
-    - Provide different "characters" (wide/centered/airy)
-
-  Implementation style:
-    - Each pattern is expressed as index/sign lists.
-    - We normalize by number of taps to keep levels consistent.
-
-  Note:
-    This is intentionally simple. The overall reverb sound character is
-    dominated by the tank, diffusion, modulation, and damping.
 */
 
 namespace bigpi::core {
@@ -32,47 +18,43 @@ namespace bigpi::core {
         return i;
     }
 
-    /*
-      We define patterns using a base "tap index list" and sign alternation.
-      For stereo decorrelation, we use different index sets for L and R.
-    */
-
     // Pattern 0: Wide balanced (good default)
     static void pattern0(const std::array<float, kMaxLines>& y, int lines, float& L, float& R) {
-        // Choose taps spread around the network
-        // Use sign flips to reduce correlation.
         static const int tapsL[] = { 0, 2, 5, 7, 9, 12, 14 };
         static const int tapsR[] = { 1, 3, 4, 6, 10, 13, 15 };
 
         float sumL = 0.0f, sumR = 0.0f;
 
-        for (int t = 0; t < (int)(sizeof(tapsL) / sizeof(tapsL[0])); ++t) {
+        const int nL = int(sizeof(tapsL) / sizeof(tapsL[0]));
+        const int nR = int(sizeof(tapsR) / sizeof(tapsR[0]));
+
+        for (int t = 0; t < nL; ++t) {
             int idx = wrapIndex(tapsL[t], lines);
             float s = (t & 1) ? -1.0f : 1.0f;
             sumL += s * y[idx];
         }
 
-        for (int t = 0; t < (int)(sizeof(tapsR) / sizeof(tapsR[0])); ++t) {
+        for (int t = 0; t < nR; ++t) {
             int idx = wrapIndex(tapsR[t], lines);
-            float s = (t & 1) ? 1.0f : -1.0f; // opposite sign sequence to decorrelate
+            float s = (t & 1) ? 1.0f : -1.0f; // opposite sign sequence
             sumR += s * y[idx];
         }
 
         // Normalize by number of taps.
-        L = sumL * (1.0f / 7.0f);
-        R = sumR * (1.0f / 7.0f);
+        L = sumL * (1.0f / float(nL));
+        R = sumR * (1.0f / float(nR));
     }
 
     // Pattern 1: More centered (less extreme width)
     static void pattern1(const std::array<float, kMaxLines>& y, int lines, float& L, float& R) {
         static const int taps[] = { 0, 3, 5, 8, 11, 13 };
+        const int n = int(sizeof(taps) / sizeof(taps[0]));
 
         float sumL = 0.0f, sumR = 0.0f;
 
-        for (int t = 0; t < (int)(sizeof(taps) / sizeof(taps[0])); ++t) {
+        for (int t = 0; t < n; ++t) {
             int idx = wrapIndex(taps[t], lines);
 
-            // L uses alternating sign; R uses same taps but shifted sign pattern
             float sL = (t & 1) ? -1.0f : 1.0f;
             float sR = (t & 1) ? 1.0f : -1.0f;
 
@@ -80,8 +62,8 @@ namespace bigpi::core {
             sumR += sR * y[idx];
         }
 
-        L = sumL * (1.0f / 6.0f);
-        R = sumR * (1.0f / 6.0f);
+        L = sumL * (1.0f / float(n));
+        R = sumR * (1.0f / float(n));
     }
 
     // Pattern 2: Airy / scattered (lighter, more “sparkly”)
@@ -109,38 +91,40 @@ namespace bigpi::core {
 
     // Pattern 3: Very wide / aggressive decorrelation
     static void pattern3(const std::array<float, kMaxLines>& y, int lines, float& L, float& R) {
-        // Use many taps and heavy sign flipping.
         float sumL = 0.0f, sumR = 0.0f;
 
-        // L sums even indices, R sums odd indices (with alternating signs)
-        int taps = 0;
+        int tapsL = 0;
+        int tapsR = 0;
 
+        // L sums even indices, R sums odd indices (with opposite sign relationship)
         for (int i = 0; i < lines; ++i) {
             float s = (i & 1) ? -1.0f : 1.0f;
 
             if ((i & 1) == 0) {
                 sumL += s * y[i];
-                taps++;
+                tapsL++;
             }
             else {
-                sumR += (-s) * y[i]; // opposite sign relationship
+                sumR += (-s) * y[i];
+                tapsR++;
             }
         }
 
-        // Normalize:
-        float norm = (taps > 0) ? (1.0f / float(taps)) : 1.0f;
-        L = sumL * norm;
-        R = sumR * norm;
+        float normL = (tapsL > 0) ? (1.0f / float(tapsL)) : 1.0f;
+        float normR = (tapsR > 0) ? (1.0f / float(tapsR)) : 1.0f;
+
+        L = sumL * normL;
+        R = sumR * normR;
     }
 
     void renderTapPattern(const std::array<float, kMaxLines>& y,
         int lines,
         int patternId,
         float& wetL,
-        float& wetR) {
+        float& wetR)
+    {
         lines = std::max(1, std::min(lines, kMaxLines));
 
-        // Normalize patternId so any integer maps to a valid pattern.
         int pid = patternId % 4;
         if (pid < 0) pid += 4;
 

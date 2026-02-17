@@ -1,3 +1,4 @@
+// =========================== src/dsp/tail/Tank.h ============================
 #pragma once
 /*
   =============================================================================
@@ -13,32 +14,21 @@
     - cross-mixed by a matrix each sample
     - fed back with filters
 
-  Why this works:
-    - Delay lines create echoes.
-    - Feedback makes echoes repeat and decay over time.
-    - Filters in the feedback path make decay frequency-dependent (damping).
-    - Cross-mixing spreads energy quickly -> high echo density -> smooth tail.
-
-  Big Pi Tank features (Kappa-level):
-  ----------------------------------
+  Big Pi Tank features:
+  ---------------------
   1) 8 or 16 delay lines (Eco / HQ)
-  2) Matrix mixing (Hadamard or Householder) done externally
+  2) Matrix mixing (Hadamard or Householder)
   3) Per-line HP and LP filters in the feedback loop
   4) Multiband decay coloration:
        - low/mid/high bands decay at different rates
-       - helps “natural” tail (lows can ring longer, highs die faster)
   5) Fractional delay modulation:
-       - modulates read position to reduce metallic ringing
-       - per-line depth/rate maps
+       - per-line LFO modulation
   6) Jitter modulation:
        - smoothed random modulation on top of sinusoidal LFO
-       - adds organic motion without obvious pitch wobble
   7) Envelope follower:
        - measures internal tank energy (tail “age” proxy)
-       - used by engine to drive time-varying diffusion / pattern morph / dyn damping
   8) Optional saturation inside feedback:
        - adds density and “glue”
-       - prevents sterile digital tail
 
   Real-time safety:
     - No allocations during processSample()
@@ -47,10 +37,9 @@
 
 #include <array>
 #include <cstdint>
-#include <algorithm>
 
-#include "../Dsp.h"
-#include "Matrices.h"
+#include "dsp/common/Dsp.h"
+#include "dsp/tail/Matrices.h"
 
 namespace bigpi::core {
 
@@ -58,11 +47,12 @@ namespace bigpi::core {
     public:
         static constexpr int kMaxLines = 16;
 
-        // --------------------------------------------------------------------------
+        // ----------------------------------------------------------------------
         // Configuration
-        // --------------------------------------------------------------------------
+        // ----------------------------------------------------------------------
 
         struct Config {
+            // Number of active delay lines. Clamped internally to [1, kMaxLines].
             int lines = 16;
 
             MatrixType matrix = MatrixType::Householder;
@@ -84,20 +74,22 @@ namespace bigpi::core {
             float decayHighMul = 0.90f;
 
             // Saturation inside feedback loop
-            float drive = 1.2f;   // how hard to drive
-            float satMix = 0.25f;  // 0 clean, 1 fully saturated feedback
+            float drive = 1.2f;     // how hard to drive
+            float satMix = 0.25f;   // 0 clean, 1 fully saturated feedback
 
             // Modulation
             float modDepthSamples = 0.0f; // already converted to samples by engine
             float modRateHz = 0.25f;
 
             // Per-line modulation scaling (maps)
+            // IMPORTANT: These must be filled by presets/engine.
+            // If left as all zeros, modulation will effectively do nothing.
             std::array<float, kMaxLines> modDepthMul{};
             std::array<float, kMaxLines> modRateMul{};
 
             // Jitter modulation (smoothed random)
             float jitterEnable = 1.0f;
-            float jitterAmount = 0.35f; // multiplier of modDepthSamples
+            float jitterAmount = 0.35f;   // multiplier of modDepthSamples
             float jitterRateHz = 0.35f;
             float jitterSmoothMs = 80.0f;
 
@@ -111,19 +103,19 @@ namespace bigpi::core {
             float dynRelMs = 280.0f;
         };
 
-        // --------------------------------------------------------------------------
+        // ----------------------------------------------------------------------
         // Lifecycle
-        // --------------------------------------------------------------------------
+        // ----------------------------------------------------------------------
 
         Tank() = default;
 
         /*
           init(sampleRate, maxDelaySamples, seed)
           ---------------------------------------
-          Allocates delay line buffers and initializes internal filters/LFO helpers.
+          Allocates delay line buffers and initializes internal filter/mod helpers.
 
           - maxDelaySamples must be >= maximum delaySamp you plan to use.
-            (we usually allocate based on sampleRate and a worst-case max delay time)
+            (we allocate based on sampleRate and a worst-case max delay time)
         */
         void init(float sampleRate, int maxDelaySamples, uint32_t seed);
 
@@ -136,9 +128,9 @@ namespace bigpi::core {
         // Access current config
         const Config& getConfig() const { return cfg; }
 
-        // --------------------------------------------------------------------------
+        // ----------------------------------------------------------------------
         // Processing
-        // --------------------------------------------------------------------------
+        // ----------------------------------------------------------------------
 
         /*
           processSample(inj, baseDecay, lfoBank, yOut)
@@ -146,19 +138,16 @@ namespace bigpi::core {
           Processes ONE sample through the tank.
 
           Inputs:
-            inj       : injection sample (mono) that feeds the tank
+            inj       : injection sample (mono) that feeds the tank each sample
             baseDecay : base feedback amount (0..1), before multiband multipliers
             lfoBank   : MultiLFO used for sinusoidal per-line modulation
 
           Outputs:
-            yOut[i]   : the raw delay line outputs after reading delays
+            yOut[i]   : raw delay line outputs (first cfg.lines values are valid)
 
           Notes:
-            - The caller (ReverbEngine) will:
-                * mix yOut through matrix
-                * render tap patterns from yOut to stereo
-                * optionally apply more diffusion and output stage processing
-            - We still do internal feedback filtering and delay write-back here.
+            - Tank does: read -> matrix mix -> filter/decay -> writeback
+            - Engine does: injection creation, tap rendering, diffusion/output stage
         */
         void processSample(float inj,
             float baseDecay,
@@ -181,7 +170,7 @@ namespace bigpi::core {
         std::array<dsp::OnePoleHP, kMaxLines> hp{};
         std::array<dsp::OnePoleLP, kMaxLines> lp{};
 
-        // Multiband split filters (very cheap: one-pole approximations)
+        // Multiband split filters (cheap: one-pole approximations)
         std::array<dsp::OnePoleLP, kMaxLines> xLo{};
         std::array<dsp::OnePoleLP, kMaxLines> xHi{};
 
@@ -192,23 +181,18 @@ namespace bigpi::core {
         dsp::EnvelopeFollower envFollower{};
         float env01 = 0.0f;
 
-        // For dynamic damping (if enabled)
+        // Smoothed dynamic damping cutoff
         float dynDampHzCurrent = 9000.0f;
 
-        // Internal helper state: last outputs
+        // Last outputs (debug/inspection; not required for sound)
         std::array<float, kMaxLines> lastY{};
 
         // Seed for deterministic variation
         uint32_t seed = 0x12345678u;
-
-        // Helpers
-        static inline float msToSamples(float ms, float sr) {
-            return ms * 0.001f * sr;
-        }
 
         // Compute dynamic damping cutoff based on tank envelope
         float computeDynamicDampingHz(float staticDampHz, float env01Now);
     };
 
 } // namespace bigpi::core
-#pragma once
+

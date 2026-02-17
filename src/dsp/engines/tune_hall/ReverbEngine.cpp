@@ -1,14 +1,18 @@
-#include "ReverbEngine.h"
-#include "Version.h"
+#include "dsp/engines/tune_hall/ReverbEngine.h"
+
+#include <algorithm> // std::min, std::max
+#include <array>     // std::array
+#include <cmath>     // std::abs
 
 static inline float msToSamples(float ms, float sr) {
     return ms * 0.001f * sr;
 }
 
 void ReverbEngine::prepare(float sampleRate, int blockSize) {
-    sr = sampleRate;
+    sr = (sampleRate <= 1.0f) ? 48000.0f : sampleRate;
     block = std::max(1, blockSize);
 
+    // Pre-allocate block buffers (real-time safe)
     wetL.assign(block, 0.0f);
     wetR.assign(block, 0.0f);
     erL.assign(block, 0.0f);
@@ -32,13 +36,17 @@ void ReverbEngine::prepare(float sampleRate, int blockSize) {
     int maxTankDelay = std::max(64, int(sr * 2.5f));
     tank.init(sr, maxTankDelay, 0xC0FFEEu);
 
+    // Apply preset defaults into target + tank config
     applyModePreset(target.mode);
 
-    reset();
+    // IMPORTANT:
+    // reset() must work during prepare(). It should not be gated by prepared==true.
     prepared = true;
+    reset();
 }
 
 void ReverbEngine::reset() {
+    // Always reset if prepare() has been called. (prepare() sets prepared=true)
     if (!prepared) return;
 
     preL.clear();
@@ -60,6 +68,7 @@ void ReverbEngine::setParams(const Params& p) {
         applyModePreset(target.mode);
     }
 
+    // Early reflections
     EarlyReflections::Params erp;
     erp.level = target.erLevel;
     erp.size = target.erSize;
@@ -67,6 +76,7 @@ void ReverbEngine::setParams(const Params& p) {
     erp.width = target.erWidth;
     er.setParams(erp);
 
+    // Output stage
     OutputStage::Params op;
     op.hpHz = target.outHpHz;
     op.lowShelfHz = target.outLowShelfHz;
@@ -123,14 +133,6 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
         ? bigpi::core::MatrixType::Householder
         : bigpi::core::MatrixType::Hadamard;
 
-    // --------------------------------------------------------------------------
-    // Delay line sets (ms) per mode
-    //
-    // NOTE:
-    // We start with a general-purpose set for most modes, but for Hall we use
-    // a dedicated set (Phase 1 tuning). This is a major quality lever.
-    // --------------------------------------------------------------------------
-
     static const float baseMs16_Default[16] = {
       29.7f, 37.1f, 41.1f, 43.7f,
       53.9f, 59.5f, 61.7f, 71.3f,
@@ -138,7 +140,6 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
       107.9f, 115.1f, 123.7f, 131.9f
     };
 
-    // Tuned Hall set (slightly different distribution to reduce metallicity)
     static const float baseMs16_Hall[16] = {
       31.7f, 37.9f, 41.3f, 43.1f,
       53.3f, 59.9f, 61.1f, 71.7f,
@@ -147,20 +148,17 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     };
 
     const float* baseSet = baseMs16_Default;
-    if (m == bigpi::Mode::Hall) {
-        baseSet = baseMs16_Hall;
-    }
+    if (m == bigpi::Mode::Hall) baseSet = baseMs16_Hall;
 
     for (int i = 0; i < 16; ++i) {
         float ms = baseSet[i] * modeCfg.tank.delayScale;
         tc.delaySamp[i] = msToSamples(ms, sr);
     }
 
-    // Copy modulation maps from preset
     tc.modDepthMul = modeCfg.tank.modDepthMul;
     tc.modRateMul = modeCfg.tank.modRateMul;
 
-    // Apply tank tuning from preset (what TankConfig actually owns)
+    // Preset-driven parameters (stored in target)
     target.inputDiffStages = modeCfg.tank.inputDiffStages;
     target.inputDiffG = modeCfg.tank.inputDiffG;
 
@@ -174,9 +172,7 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     target.decayMidMul = modeCfg.tank.decayMidMul;
     target.decayHighMul = modeCfg.tank.decayHighMul;
 
-    // --------------------------------------------------------------------------
-    // Mode suggested defaults (UI-ish defaults)
-    // --------------------------------------------------------------------------
+    // Mode suggested defaults
     target.mix = modeCfg.defaultMix;
     target.decay = modeCfg.defaultDecay;
     target.dampingHz = modeCfg.defaultDamping;
@@ -185,29 +181,18 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     target.erLevel = modeCfg.defaultERLevel;
     target.erSize = modeCfg.defaultERSize;
 
-    // --------------------------------------------------------------------------
-    // Hall-specific extra voicing (Phase 1)
-    //
-    // These parameters are not currently stored in ModeConfig/TankConfig,
-    // so we set them here when Hall is selected.
-    // --------------------------------------------------------------------------
     if (m == bigpi::Mode::Hall) {
-
-        // Multiband crossover points (more realistic hall warmth)
         target.fbXoverLoHz = 220.0f;
         target.fbXoverHiHz = 3800.0f;
 
-        // ER voicing
         target.erDampHz = 8500.0f;
         target.erWidth = 1.20f;
 
-        // Jitter tuning: subtle organic motion without chorus wobble
         target.modJitterEnable = 1.0f;
         target.modJitterAmount = 0.25f;
         target.modJitterRateHz = 0.30f;
         target.modJitterSmoothMs = 90.0f;
 
-        // Output voicing: gentle warmth + slightly darker top
         target.outHpHz = 22.0f;
 
         target.outLowShelfHz = 180.0f;
@@ -217,16 +202,10 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
         target.outHighGainDb = -1.5f;
 
         target.outWidth = 1.15f;
-
-        // Keep saturation off by default for Hall
         target.outDrive = 0.0f;
     }
 
-    // --------------------------------------------------------------------------
-    // Push updated configs into modules NOW
-    // (So switching modes immediately updates sound even before next setParams)
-    // --------------------------------------------------------------------------
-
+    // Push configs NOW so mode switches take effect immediately
     tank.setConfig(tc);
 
     EarlyReflections::Params erp;
@@ -236,7 +215,6 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     erp.width = target.erWidth;
     er.setParams(erp);
 
-    // Update output stage immediately too
     OutputStage::Params op;
     op.hpHz = target.outHpHz;
     op.lowShelfHz = target.outLowShelfHz;
@@ -248,7 +226,6 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     op.level = target.outLevel;
     outStage.setParams(op);
 
-    // Also update diffusion configs immediately
     bigpi::core::Diffusion::InputConfig inCfg = {};
     inCfg.stages = target.inputDiffStages;
     inCfg.g = target.inputDiffG;
@@ -259,8 +236,7 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     lateCfg.maxG = target.lateDiffMaxG;
     diffusion.setLateConfig(lateCfg);
 
-    // Finally: apply crossover/multiband/mod/jitter changes into tank config too
-    // (these are owned by Tank::Config, not TankPreset)
+    // Ensure tank config includes the non-preset owned fields too
     bigpi::core::Tank::Config tc2 = tank.getConfig();
     tc2.xoverLoHz = target.fbXoverLoHz;
     tc2.xoverHiHz = target.fbXoverHiHz;
@@ -296,107 +272,113 @@ float ReverbEngine::computeLoudnessCompDb(float decay01) const {
     float strength = dsp::clampf(target.loudCompStrength, 0.0f, 1.0f);
     float maxDb = dsp::clampf(target.loudCompMaxDb, 0.0f, 24.0f);
 
-    float attDb = -maxDb * strength * decay01;
-    return attDb;
+    return -maxDb * strength * decay01;
 }
 
 void ReverbEngine::processBlock(const float* inL, const float* inR,
     float* outL, float* outR,
-    int n) {
+    int n)
+{
     if (!prepared) return;
+    if (n <= 0) return;
 
-    if (n > block) {
-        // For development harness, allow resize. For hard real-time, pre-allocate.
-        block = n;
-        wetL.assign(block, 0.0f);
-        wetR.assign(block, 0.0f);
-        erL.assign(block, 0.0f);
-        erR.assign(block, 0.0f);
-    }
+    // Real-time safety: never resize buffers here.
+    // If n > block (allocated in prepare), process in chunks.
+    int pos = 0;
+    while (pos < n) {
+        const int chunk = std::min(block, n - pos);
 
-    float preSamp = msToSamples(dsp::clampf(target.predelayMs, 0.0f, 200.0f), sr);
+        const float preSamp = msToSamples(dsp::clampf(target.predelayMs, 0.0f, 200.0f), sr);
 
-    for (int i = 0; i < n; ++i) {
-        preL.push(inL[i]);
-        preR.push(inR[i]);
-        wetL[i] = preL.readFracCubic(preSamp);
-        wetR[i] = preR.readFracCubic(preSamp);
-    }
+        // Predelay stage
+        for (int i = 0; i < chunk; ++i) {
+            preL.push(inL[pos + i]);
+            preR.push(inR[pos + i]);
+            wetL[i] = preL.readFracCubic(preSamp);
+            wetR[i] = preR.readFracCubic(preSamp);
+        }
 
-    er.processBlock(wetL.data(), wetR.data(), erL.data(), erR.data(), n);
+        // Early reflections
+        er.processBlock(wetL.data(), wetR.data(), erL.data(), erR.data(), chunk);
 
-    std::array<float, bigpi::core::kMaxLines> yVec{};
+        std::array<float, bigpi::core::kMaxLines> yVec{};
 
-    float effDecay = computeEffectiveDecay(target.decay, target.freeze);
+        const float effDecay = computeEffectiveDecay(target.decay, target.freeze);
 
-    float loudDb = 0.0f;
-    if (target.loudCompEnable > 0.0001f) loudDb = computeLoudnessCompDb(target.decay);
-    float loudGain = dsp::dbToLin(loudDb);
+        float loudDb = 0.0f;
+        if (target.loudCompEnable > 0.0001f) loudDb = computeLoudnessCompDb(target.decay);
+        const float loudGain = dsp::dbToLin(loudDb);
 
-    float duckDepthLin = dsp::dbToLin(-dsp::clampf(target.duckDepthDb, 0.0f, 36.0f));
-    float duckThreshLin = dsp::dbToLin(dsp::clampf(target.duckThresholdDb, -80.0f, 0.0f));
+        const float duckDepthLin = dsp::dbToLin(-dsp::clampf(target.duckDepthDb, 0.0f, 36.0f));
+        const float duckThreshLin = dsp::dbToLin(dsp::clampf(target.duckThresholdDb, -80.0f, 0.0f));
 
-    for (int i = 0; i < n; ++i) {
-        float pL = wetL[i];
-        float pR = wetR[i];
-
-        float eL = erL[i];
-        float eR = erR[i];
-
-        float injL = pL + eL * 0.65f;
-        float injR = pR + eR * 0.65f;
-
+        // Control parameter: set once per chunk (not per-sample)
         diffusion.setTimeVaryingG(target.inputDiffG);
-        diffusion.processInput(injL, injR);
 
-        float injMono = 0.5f * (injL + injR);
+        // Cache tank config once per chunk (avoids repeated getConfig())
+        const auto tc = tank.getConfig();
 
-        tank.processSample(injMono, effDecay, lfos, yVec);
+        for (int i = 0; i < chunk; ++i) {
+            const float pL = wetL[i];
+            const float pR = wetR[i];
 
-        float tailL = 0.0f, tailR = 0.0f;
-        bigpi::core::renderTapPattern(yVec, tank.getConfig().lines, modeCfg.tank.tapPattern, tailL, tailR);
+            const float eL = erL[i];
+            const float eR = erR[i];
 
-        if (target.lateDiffEnable > 0.0001f) {
-            diffusion.processLate(tailL, tailR, dsp::clampf(target.lateDiffAmount, 0.0f, 1.0f));
-        }
+            float injL = pL + eL * 0.65f;
+            float injR = pR + eR * 0.65f;
 
-        float wetOutL = tailL + eL;
-        float wetOutR = tailR + eR;
+            diffusion.processInput(injL, injR);
 
-        wetOutL *= loudGain;
-        wetOutR *= loudGain;
+            const float injMono = 0.5f * (injL + injR);
 
-        float duckGain = 1.0f;
-        if (target.duckEnable > 0.0001f) {
-            float inMono = 0.5f * (std::abs(inL[i]) + std::abs(inR[i]));
-            float env = duckEnv.process(inMono);
+            tank.processSample(injMono, effDecay, lfos, yVec);
 
-            if (env > duckThreshLin) {
-                float over = dsp::clampf((env - duckThreshLin) / std::max(1e-6f, (1.0f - duckThreshLin)), 0.0f, 1.0f);
-                duckGain = (1.0f - over) + over * duckDepthLin;
+            float tailL = 0.0f, tailR = 0.0f;
+            bigpi::core::renderTapPattern(yVec, tc.lines, modeCfg.tank.tapPattern, tailL, tailR);
+
+            if (target.lateDiffEnable > 0.0001f) {
+                diffusion.processLate(tailL, tailR, dsp::clampf(target.lateDiffAmount, 0.0f, 1.0f));
             }
+
+            float wetOutL = tailL + eL;
+            float wetOutR = tailR + eR;
+
+            wetOutL *= loudGain;
+            wetOutR *= loudGain;
+
+            float duckGain = 1.0f;
+            if (target.duckEnable > 0.0001f) {
+                const float inMono = 0.5f * (std::abs(inL[pos + i]) + std::abs(inR[pos + i]));
+                const float env = duckEnv.process(inMono);
+
+                if (env > duckThreshLin) {
+                    const float denom = std::max(1e-6f, (1.0f - duckThreshLin));
+                    const float over = dsp::clampf((env - duckThreshLin) / denom, 0.0f, 1.0f);
+                    duckGain = (1.0f - over) + over * duckDepthLin;
+                }
+            }
+
+            wetL[i] = wetOutL * duckGain;
+            wetR[i] = wetOutR * duckGain;
         }
 
-        wetOutL *= duckGain;
-        wetOutR *= duckGain;
+        outStage.processBlock(wetL.data(), wetR.data(), chunk);
 
-        wetL[i] = wetOutL;
-        wetR[i] = wetOutR;
-    }
+        const float mix = dsp::clampf(target.mix, 0.0f, 1.0f);
 
-    outStage.processBlock(wetL.data(), wetR.data(), n);
+        for (int i = 0; i < chunk; ++i) {
+            const float dryL = inL[pos + i];
+            const float dryR = inR[pos + i];
 
-    float mix = dsp::clampf(target.mix, 0.0f, 1.0f);
+            const float wL = wetL[i];
+            const float wR = wetR[i];
 
-    for (int i = 0; i < n; ++i) {
-        float dryL = inL[i];
-        float dryR = inR[i];
+            outL[pos + i] = (1.0f - mix) * dryL + mix * wL;
+            outR[pos + i] = (1.0f - mix) * dryR + mix * wR;
+        }
 
-        float wL = wetL[i];
-        float wR = wetR[i];
-
-        outL[i] = (1.0f - mix) * dryL + mix * wL;
-        outR[i] = (1.0f - mix) * dryR + mix * wR;
+        pos += chunk;
     }
 }
 

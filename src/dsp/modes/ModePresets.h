@@ -24,12 +24,13 @@
 
   Implementation note:
   --------------------
-  ModePresets.cpp will return a ModeConfig object for a given Mode.
+  ModePresets.cpp returns a ModeConfig object for a given Mode.
 */
 
 #include <array>
-#include "../Dsp.h"
-#include "Modes.h"
+
+#include "dsp/common/Dsp.h"
+#include "dsp/modes/Modes.h"
 
 namespace bigpi {
 
@@ -38,12 +39,12 @@ namespace bigpi {
     // ============================================================================
 
     struct ModeFeatures {
-        bool usePitchBlock = false;  // Shimmer
-        bool useGranularBlock = false;  // Granular
-        bool useMagneticBlock = false;  // Magnetic
-        bool useSingularity = false;  // Blackhole-style warp
-        bool useSpringModel = false;  // Physical spring structure
-        bool useBlossomEnv = false;  // Bloom-style swell shaping
+        bool usePitchBlock = false;      // Shimmer
+        bool useGranularBlock = false;   // Granular
+        bool useMagneticBlock = false;   // Magnetic
+        bool useSingularity = false;     // Blackhole-style warp
+        bool useSpringModel = false;     // Physical spring structure
+        bool useBlossomEnv = false;      // Bloom-style swell shaping
     };
 
     // ============================================================================
@@ -53,9 +54,9 @@ namespace bigpi {
     struct TankConfig {
 
         // Delay network structure
-        int   delayLines = 16;    // 8 (Eco) or 16 (HQ)
-        float delayScale = 1.0f;  // scales base delay set
-        bool  useHouseholder = true;  // else Hadamard
+        int   delayLines = 16;         // 8 (Eco) or 16 (HQ)
+        float delayScale = 1.0f;       // scales base delay set
+        bool  useHouseholder = true;   // else Hadamard
 
         // Diffusion (input)
         int   inputDiffStages = 6;
@@ -78,7 +79,9 @@ namespace bigpi {
         int tapPattern = 0;
         int tapPatternLate = 1;
 
-        // Per-line modulation multipliers
+        // Per-line modulation multipliers (16 lines max).
+        // IMPORTANT: These must be filled by presets (ModePresets.cpp).
+        // If left as all zeros, modulation will effectively do nothing.
         std::array<float, 16> modDepthMul{};
         std::array<float, 16> modRateMul{};
     };
@@ -89,11 +92,11 @@ namespace bigpi {
 
     struct ModeConfig {
 
-        Mode mode;
+        Mode mode = Mode::Hall;
 
-        TankConfig tank;
+        TankConfig tank{};
 
-        ModeFeatures features;
+        ModeFeatures features{};
 
         // Suggested default parameters (UI defaults)
         float defaultMix = 0.35f;
@@ -122,4 +125,3 @@ namespace bigpi {
     ModeConfig getModePreset(Mode m);
 
 } // namespace bigpi
-#pragma once

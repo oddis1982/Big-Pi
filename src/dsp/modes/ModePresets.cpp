@@ -1,4 +1,6 @@
-#include "ModePresets.h"
+#include "dsp/modes/ModePresets.h"
+
+#include <algorithm> // std::min, std::max
 
 /*
   =============================================================================
@@ -10,46 +12,68 @@ namespace bigpi {
 
     // Helper to fill default modulation maps with a pleasing spread.
     static void fillModMap_Default(std::array<float, 16>& depthMul,
-        std::array<float, 16>& rateMul) {
+        std::array<float, 16>& rateMul)
+    {
         for (int i = 0; i < 16; ++i) {
-            float t = (16 == 1) ? 0.0f : float(i) / 15.0f;
-            depthMul[i] = 0.85f + 0.30f * t; // 0.85..1.15
-            rateMul[i] = 0.80f + 0.40f * t; // 0.80..1.20
+            float t = float(i) / 15.0f;        // 0..1
+            depthMul[i] = 0.85f + 0.30f * t;   // 0.85..1.15
+            rateMul[i] = 0.80f + 0.40f * t;   // 0.80..1.20
         }
     }
 
     static void fillModMap_Plate(std::array<float, 16>& depthMul,
-        std::array<float, 16>& rateMul) {
+        std::array<float, 16>& rateMul)
+    {
         for (int i = 0; i < 16; ++i) {
-            float t = (16 == 1) ? 0.0f : float(i) / 15.0f;
-            depthMul[i] = 0.92f + 0.16f * t; // 0.92..1.08
-            rateMul[i] = 0.90f + 0.20f * t; // 0.90..1.10
+            float t = float(i) / 15.0f;
+            depthMul[i] = 0.92f + 0.16f * t;   // 0.92..1.08
+            rateMul[i] = 0.90f + 0.20f * t;   // 0.90..1.10
         }
     }
 
     static void fillModMap_Sky(std::array<float, 16>& depthMul,
-        std::array<float, 16>& rateMul) {
+        std::array<float, 16>& rateMul)
+    {
         for (int i = 0; i < 16; ++i) {
-            float t = (16 == 1) ? 0.0f : float(i) / 15.0f;
-            depthMul[i] = 0.75f + 0.50f * t; // 0.75..1.25
-            rateMul[i] = 0.70f + 0.60f * t; // 0.70..1.30
+            float t = float(i) / 15.0f;
+            depthMul[i] = 0.75f + 0.50f * t;   // 0.75..1.25
+            rateMul[i] = 0.70f + 0.60f * t;   // 0.70..1.30
         }
     }
 
     static void fillModMap_Vintage(std::array<float, 16>& depthMul,
-        std::array<float, 16>& rateMul) {
+        std::array<float, 16>& rateMul)
+    {
         for (int i = 0; i < 16; ++i) {
-            float t = (16 == 1) ? 0.0f : float(i) / 15.0f;
-            depthMul[i] = 0.85f + 0.25f * t; // 0.85..1.10
-            rateMul[i] = 0.60f + 0.30f * t; // 0.60..0.90
+            float t = float(i) / 15.0f;
+            depthMul[i] = 0.85f + 0.25f * t;   // 0.85..1.10
+            rateMul[i] = 0.60f + 0.30f * t;   // 0.60..0.90
         }
+    }
+
+    static bool modMapAllZero(const std::array<float, 16>& a,
+        const std::array<float, 16>& b)
+    {
+        for (int i = 0; i < 16; ++i) {
+            if (a[i] != 0.0f) return false;
+            if (b[i] != 0.0f) return false;
+        }
+        return true;
+    }
+
+    static int clampDelayLines(int n) {
+        // Big Pi supports 8 or 16. If something else slips in, default to 16.
+        if (n == 8) return 8;
+        return 16;
     }
 
     ModeConfig getModePreset(Mode m) {
         ModeConfig cfg{};
         cfg.mode = m;
 
-        // Global defaults (sensible Kappa baseline)
+        // ----------------------------------------------------------------------
+        // Global defaults (sensible baseline)
+        // ----------------------------------------------------------------------
         cfg.tank.delayLines = 16;
         cfg.tank.delayScale = 1.0f;
         cfg.tank.useHouseholder = true;
@@ -80,6 +104,9 @@ namespace bigpi {
         cfg.defaultERLevel = 0.30f;
         cfg.defaultERSize = 0.55f;
 
+        // ----------------------------------------------------------------------
+        // Mode-specific overrides
+        // ----------------------------------------------------------------------
         switch (m) {
 
         case Mode::Room: {
@@ -108,24 +135,19 @@ namespace bigpi {
             cfg.tank.delayScale = 1.15f;
             cfg.tank.useHouseholder = true;
 
-            // Softer onset: slightly lower diffusion coefficient
             cfg.tank.inputDiffStages = 6;
             cfg.tank.inputDiffG = 0.68f;
 
-            // Late diffusion range
             cfg.tank.lateDiffMinG = 0.48f;
             cfg.tank.lateDiffMaxG = 0.74f;
 
-            // Slow, subtle modulation (avoid chorus wobble)
             cfg.tank.modDepthMs = 4.5f;
             cfg.tank.modRateHz = 0.18f;
 
-            // Tonal realism: lows linger, highs decay faster
             cfg.tank.decayLowMul = 1.12f;
             cfg.tank.decayMidMul = 1.00f;
             cfg.tank.decayHighMul = 0.86f;
 
-            // Suggested UI defaults
             cfg.defaultPreDelay = 25.0f;
             cfg.defaultDecay = 0.93f;
             cfg.defaultDamping = 9000.0f;
@@ -383,8 +405,26 @@ namespace bigpi {
             break;
         }
 
+        // ----------------------------------------------------------------------
+        // Final safety clamps / invariants
+        // ----------------------------------------------------------------------
+
+        cfg.tank.delayLines = clampDelayLines(cfg.tank.delayLines);
+
         cfg.tank.inputDiffStages = std::max(0, std::min(cfg.tank.inputDiffStages, 8));
+
+        // Ensure late diffusion range is ordered
+        if (cfg.tank.lateDiffMinG > cfg.tank.lateDiffMaxG) {
+            std::swap(cfg.tank.lateDiffMinG, cfg.tank.lateDiffMaxG);
+        }
+
+        // Ensure modulation maps are not accidentally left all-zero
+        if (modMapAllZero(cfg.tank.modDepthMul, cfg.tank.modRateMul)) {
+            fillModMap_Default(cfg.tank.modDepthMul, cfg.tank.modRateMul);
+        }
+
         return cfg;
     }
 
 } // namespace bigpi
+

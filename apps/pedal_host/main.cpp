@@ -4,10 +4,11 @@
 #include <cstdint>
 #include <fstream>
 #include <algorithm>
+#include <string>
 
-#include "../Source/Version.h"
-#include "../Source/ReverbEngine.h"
-#include "../Source/Modes/Modes.h"
+#include "core/Version.h"
+#include "dsp/engines/tune_hall/ReverbEngine.h"
+#include "dsp/modes/Modes.h"
 
 /*
   =============================================================================
@@ -25,13 +26,87 @@
 
   How to use:
     - Build and run
-    - Find "big_pi_test.wav" in your working directory
+    - Find the WAV file in your CURRENT working directory
+      (usually the build folder you ran the program from)
     - Listen in a DAW or audio player
 */
 
 // ============================================================================
 // WAV writer helpers (16-bit PCM stereo)
 // ============================================================================
+
+/*
+===============================================================================
+HOW TO BUILD + RUN THIS TEST HARNESS (BEGINNER GUIDE)
+===============================================================================
+
+This program:
+  - Generates a test input (impulse or tone burst)
+  - Runs it through the reverb
+  - Writes a WAV file you can listen to
+
+It does NOT record your guitar or use real audio I/O yet. It is an offline test.
+
+-------------------------------------------------------------------------------
+1) PREREQUISITES (Linux)
+-------------------------------------------------------------------------------
+
+You need:
+  - A C++ compiler (g++)
+  - CMake (to configure builds)
+  - Make or Ninja (to compile)
+
+On Debian/Ubuntu/Raspberry Pi OS you can install these with:
+
+  sudo apt update
+  sudo apt install -y build-essential cmake
+
+Optional but helpful:
+  sudo apt install -y ninja-build
+
+-------------------------------------------------------------------------------
+2) BUILD (standard CMake workflow)
+-------------------------------------------------------------------------------
+
+From the project root (the folder with CMakeLists.txt):
+
+  mkdir -p build
+  cd build
+  cmake ..
+  cmake --build .
+
+-------------------------------------------------------------------------------
+3) RUN
+-------------------------------------------------------------------------------
+
+Depending on your CMakeLists, the program will usually be here:
+
+  ./bin/bigpi_test
+
+When it runs, it prints the WAV filename it wrote.
+
+The WAV file is written into your CURRENT WORKING DIRECTORY.
+If you are inside "build", the WAV will be inside "build".
+
+-------------------------------------------------------------------------------
+4) LISTEN
+-------------------------------------------------------------------------------
+
+From inside the build folder:
+
+  ls *.wav
+
+To play with ffplay:
+  sudo apt install -y ffmpeg
+  ffplay your_file.wav
+
+To play with aplay:
+  aplay your_file.wav
+
+===============================================================================
+END OF BEGINNER GUIDE
+===============================================================================
+*/
 
 static void write_u32_le(std::ofstream& f, uint32_t v) {
     char b[4];
@@ -127,27 +202,45 @@ static void generate_tone_burst(std::vector<float>& L, std::vector<float>& R,
     int sampleRate,
     float freqHz,
     float burstSeconds,
-    float amplitude) {
+    float amplitude)
+{
     std::fill(L.begin(), L.end(), 0.0f);
     std::fill(R.begin(), R.end(), 0.0f);
 
     const int burstSamples = std::min<int>((int)L.size(), int(burstSeconds * sampleRate));
     const float w = 2.0f * float(M_PI) * freqHz / float(sampleRate);
 
-    const int fadeSamples = std::min(256, burstSamples / 4);
+    // Fade helps avoid clicks at the start/end of the burst.
+    const int fadeSamples = std::max(1, std::min(256, burstSamples / 4));
 
     for (int n = 0; n < burstSamples; ++n) {
         float env = 1.0f;
 
-        if (n < fadeSamples) env *= float(n) / float(fadeSamples);
-        if (n > burstSamples - fadeSamples) env *= float(burstSamples - n) / float(fadeSamples);
+        // Fade in
+        if (n < fadeSamples) {
+            env *= float(n) / float(fadeSamples);
+        }
 
-        float s = std::sin(w * float(n));
-        float x = amplitude * env * s;
+        // Fade out (safe even when fadeSamples == 1)
+        const int fadeStart = burstSamples - fadeSamples;
+        if (n >= fadeStart) {
+            const int idx = (burstSamples - 1) - n;               // counts down to 0
+            env *= float(idx) / float(std::max(1, fadeSamples - 1));
+        }
+
+        const float s = std::sin(w * float(n));
+        const float x = amplitude * env * s;
 
         L[n] = x;
         R[n] = x;
     }
+}
+
+// Helper: build a nice filename so you don’t overwrite old tests.
+static std::string make_wav_name(bigpi::Mode mode, bool impulse, bool tone) {
+    std::string modeName = bigpi::modeToString(mode);
+    std::string sig = impulse ? "impulse" : (tone ? "tone" : "silence");
+    return "big_pi_" + modeName + "_" + sig + ".wav";
 }
 
 // ============================================================================
@@ -166,9 +259,14 @@ int main() {
     std::vector<float> inL(numSamples), inR(numSamples);
     std::vector<float> outL(numSamples), outR(numSamples);
 
-    // Choose a test input
-    const bool doImpulse = true;
-    const bool doToneBurst = false;
+    // Choose a test input (BEGINNER TIP: set ONE of these true)
+    bool doImpulse = true;
+    bool doToneBurst = false;
+
+    if (doImpulse && doToneBurst) {
+        std::cout << "WARNING: doImpulse and doToneBurst are both true. Using impulse.\n";
+        doToneBurst = false;
+    }
 
     if (doImpulse) {
         std::cout << "Generating impulse...\n";
@@ -193,11 +291,13 @@ int main() {
 
     // Pick a mode to audition:
     p.mode = bigpi::Mode::Hall;  // try Room/Hall/Cathedral/Plate/Vintage etc.
-    p.mix = 0.35f;
+
+    // A few safety clamps for beginners (prevents runaway tails)
+    p.mix = std::max(0.0f, std::min(1.0f, 0.35f));
+    p.decay = std::max(0.0f, std::min(0.9995f, 0.94f));
 
     // Core controls
     p.predelayMs = 25.0f;
-    p.decay = 0.94f;
     p.dampingHz = 9000.0f;
     p.feedbackHpHz = 30.0f;
 
@@ -265,11 +365,12 @@ int main() {
         );
     }
 
-    // Write result
-    const std::string wavName = "big_pi_test.wav";
+    // Write result (mode + signal type in filename)
+    const std::string wavName = make_wav_name(p.mode, doImpulse, doToneBurst);
 
     if (write_wav_stereo_16(wavName, outL, outR, sampleRate)) {
         std::cout << "Wrote WAV: " << wavName << "\n";
+        std::cout << "Tip: The WAV is in the folder you ran the program from.\n";
         std::cout << "Try switching p.mode and re-running to compare modes.\n";
     }
     else {
@@ -280,3 +381,4 @@ int main() {
     std::cout << "Done.\n";
     return 0;
 }
+

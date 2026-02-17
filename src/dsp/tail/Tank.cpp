@@ -4,64 +4,27 @@
   =============================================================================
   Tank.cpp — Big Pi Late Reverb Tank (implementation)
   =============================================================================
-
-  This file processes ONE sample at a time through an FDN-like structure.
-
-  Terminology:
-    - "line" = one delay line in the network
-    - "inj"  = injection sample (mono) fed into the tank each sample
-    - "y[i]" = the output read from delay line i
-    - "m[i]" = the mixed vector after matrix (computed externally by engine)
-              but here we still write back using internally computed feedback
-              signal based on mixed values.
-
-  Architectural note:
-    In our modular architecture:
-      - Tank reads delay lines, applies modulation, returns y[]
-      - ReverbEngine applies matrix mixing and decides how to render taps
-      - Then Tank receives the mixed values implicitly by using lastY + external
-        matrix? (We will keep Tank self-contained by doing matrix here.)
-
-  BUT:
-    To keep files small and stable, we choose one clear approach:
-
-      ✅ Tank handles:
-         - read y[]
-         - matrix mixing (Hadamard/Householder)
-         - filter + decay + writeback
-
-      ✅ Engine handles:
-         - injection creation
-         - output tap pattern rendering
-         - diffusion + output stage + crossfades
-
-  This keeps Tank cohesive and avoids duplicated mixing logic.
-
-  Real-time safety:
-    - All memory allocated in init()
-    - processSample has no allocations
 */
+
+#include <algorithm> // std::min, std::max
+#include <cmath>     // std::abs, std::exp
 
 namespace bigpi::core {
 
     void Tank::init(float sampleRate, int maxDelaySamples, uint32_t s) {
-        sr = sampleRate;
+        sr = (sampleRate <= 1.0f) ? 48000.0f : sampleRate;
         seed = (s == 0 ? 1u : s);
 
-        // Allocate delay buffers.
-        // Each delay line gets the same max size; we control actual delay via read offset.
         maxDelaySamples = std::max(8, maxDelaySamples);
 
         for (int i = 0; i < kMaxLines; ++i) {
             d[i].init(maxDelaySamples);
 
-            // Prepare jitter noise sources (one per line)
             jitter[i].setSampleRate(sr);
-            jitter[i].seed(seed + 0x9E3779B9u * uint32_t(i + 1)); // golden ratio-ish scramble
+            jitter[i].seed(seed + 0x9E3779B9u * uint32_t(i + 1));
             jitter[i].setRateHz(0.35f);
             jitter[i].setSmoothMs(80.0f);
 
-            // Clear filters
             hp[i].clear();
             lp[i].clear();
             xLo[i].clear();
@@ -70,7 +33,6 @@ namespace bigpi::core {
             lastY[i] = 0.0f;
         }
 
-        // Envelope follower setup (tail energy proxy)
         envFollower.setSampleRate(sr);
         envFollower.setAttackReleaseMs(12.0f, 280.0f);
         envFollower.clear();
@@ -102,82 +64,84 @@ namespace bigpi::core {
     void Tank::setConfig(const Config& c) {
         cfg = c;
 
-        // Clamp line count to safe range.
         cfg.lines = std::max(1, std::min(cfg.lines, kMaxLines));
 
-        // Update feedback filters and split filters.
-        // We do this here so per-sample loop stays cheaper.
+        // Keep config values in sane ranges (prevents surprising behavior)
+        cfg.fbHpHz = dsp::clampf(cfg.fbHpHz, 5.0f, 0.49f * sr);
+        cfg.dampHz = dsp::clampf(cfg.dampHz, 20.0f, 0.49f * sr);
+
+        cfg.xoverLoHz = dsp::clampf(cfg.xoverLoHz, 30.0f, 0.49f * sr);
+        cfg.xoverHiHz = dsp::clampf(cfg.xoverHiHz, cfg.xoverLoHz + 10.0f, 0.49f * sr);
+
+        cfg.drive = dsp::clampf(cfg.drive, 0.0f, 10.0f);
+        cfg.satMix = dsp::clampf(cfg.satMix, 0.0f, 1.0f);
+
+        cfg.modRateHz = dsp::clampf(cfg.modRateHz, 0.01f, 20.0f);
+        cfg.modDepthSamples = dsp::clampf(cfg.modDepthSamples, 0.0f, 2000.0f); // safety cap
+
+        cfg.jitterEnable = dsp::clampf(cfg.jitterEnable, 0.0f, 1.0f);
+        cfg.jitterAmount = dsp::clampf(cfg.jitterAmount, 0.0f, 2.0f);
+        cfg.jitterRateHz = dsp::clampf(cfg.jitterRateHz, 0.01f, 20.0f);
+        cfg.jitterSmoothMs = dsp::clampf(cfg.jitterSmoothMs, 1.0f, 2000.0f);
+
+        cfg.dynEnable = dsp::clampf(cfg.dynEnable, 0.0f, 1.0f);
+        cfg.dynAmount = dsp::clampf(cfg.dynAmount, 0.0f, 1.0f);
+        cfg.dynSensitivity = dsp::clampf(cfg.dynSensitivity, 0.0f, 10.0f);
+
+        cfg.dynMinHz = dsp::clampf(cfg.dynMinHz, 50.0f, 0.49f * sr);
+        cfg.dynMaxHz = dsp::clampf(cfg.dynMaxHz, cfg.dynMinHz, 0.49f * sr);
+        cfg.dynAtkMs = dsp::clampf(cfg.dynAtkMs, 0.1f, 2000.0f);
+        cfg.dynRelMs = dsp::clampf(cfg.dynRelMs, 0.1f, 5000.0f);
+
+        // Update filters once per config change (cheap, safe)
         for (int i = 0; i < cfg.lines; ++i) {
             hp[i].setCutoff(cfg.fbHpHz, sr);
             lp[i].setCutoff(cfg.dampHz, sr);
 
-            // Multiband split:
-            // xLo: low-pass at xoverLoHz (gives "low band")
-            // xHi: low-pass at xoverHiHz (gives "low+mid band")
             xLo[i].setCutoff(cfg.xoverLoHz, sr);
             xHi[i].setCutoff(cfg.xoverHiHz, sr);
 
-            // Update jitter configuration
             jitter[i].setRateHz(cfg.jitterRateHz);
             jitter[i].setSmoothMs(cfg.jitterSmoothMs);
         }
 
-        // Configure envelope follower for dynamic damping behavior.
         envFollower.setAttackReleaseMs(cfg.dynAtkMs, cfg.dynRelMs);
+
+        // Keep smoother state inside sane bounds
+        dynDampHzCurrent = cfg.dampHz;
     }
 
     float Tank::computeDynamicDampingHz(float staticDampHz, float env01Now) {
-        // Dynamic damping is meant to emulate real spaces:
-        // when the tank is “excited” (loud input), highs are damped more.
-        //
-        // env01Now is roughly in [0,1] but not strictly limited.
-        // We clamp it to avoid extreme values.
         float e = dsp::clampf(env01Now * cfg.dynSensitivity, 0.0f, 1.0f);
 
-        // Map envelope to cutoff: loud -> closer to dynMinHz (darker)
-        // quiet -> closer to dynMaxHz (brighter)
+        // loud -> dynMinHz (darker), quiet -> dynMaxHz (brighter)
         float dynHz = cfg.dynMaxHz + (cfg.dynMinHz - cfg.dynMaxHz) * e;
 
-        // Blend between static damping and dynamic target.
-        // dynAmount=0 => static
-        // dynAmount=1 => fully dynamic
         float amt = dsp::clampf(cfg.dynAmount, 0.0f, 1.0f);
+        float outHz = (1.0f - amt) * staticDampHz + amt * dynHz;
 
-        return (1.0f - amt) * staticDampHz + amt * dynHz;
+        return dsp::clampf(outHz, 20.0f, 0.49f * sr);
     }
 
     void Tank::processSample(float inj,
         float baseDecay,
         dsp::MultiLFO& lfoBank,
-        std::array<float, kMaxLines>& yOut) {
+        std::array<float, kMaxLines>& yOut)
+    {
         if (!inited) {
             yOut.fill(0.0f);
             return;
         }
 
-        const int N = cfg.lines;
+        // Extra safety: cfg.lines should be clamped in setConfig(),
+        // but guard here because this is the hottest function.
+        const int N = std::max(1, std::min(cfg.lines, kMaxLines));
 
-        // Clamp decay to a safe range.
-        // Values too close to 1.0 can explode with mixing + saturation.
         baseDecay = dsp::clampf(baseDecay, 0.0f, 0.9995f);
 
-        // --------------------------------------------------------------------------
-        // 1) Read each delay line output with fractional delay modulation
-        // --------------------------------------------------------------------------
-        //
-        // Why modulate fractional delay reads?
-        //   Static delay networks can produce strong stationary resonances.
-        //   Small modulation breaks up those resonances → smoother tail.
-        //
-        // We use two modulation sources:
-        //   - sinusoidal LFO from MultiLFO (predictable periodic motion)
-        //   - smoothed random jitter (organic non-periodic motion)
-        //
-        // Total modulation (samples):
-        //   mod = modDepthSamples * (lfo * depthMul + jitterEnable * jitter * jitterAmount)
-        //
-        // Then we read at (delaySamp + mod).
-        //
+        // ----------------------------------------------------------------------
+        // 1) Read delay line outputs with fractional delay modulation
+        // ----------------------------------------------------------------------
         std::array<float, kMaxLines> y{};
         y.fill(0.0f);
 
@@ -187,10 +151,8 @@ namespace bigpi::core {
             float depthMul = cfg.modDepthMul[i];
             float rateMul = cfg.modRateMul[i];
 
-            // Sinusoidal LFO in [-1,1]
             float lfo = lfoBank.process(i, cfg.modRateHz * rateMul);
 
-            // Jitter noise in [-1,1], smoothed
             float jit = 0.0f;
             if (cfg.jitterEnable > 0.0001f) {
                 jit = jitter[i].process();
@@ -201,120 +163,73 @@ namespace bigpi::core {
 
             float delay = cfg.delaySamp[i] + mod;
 
-            // Read the delay line output at this fractional delay position.
+            // Avoid reading at ~0 delay (read head ≈ write head).
+            delay = std::max(1.0f, delay);
+
             float yi = d[i].readFracCubic(delay);
 
             y[i] = yi;
             yOut[i] = yi;
+
+            // Currently unused, but kept for future debugging/visualization
             lastY[i] = yi;
 
             peakAbs = std::max(peakAbs, std::abs(yi));
         }
 
-        // Update tank envelope (tail energy proxy).
-        // We feed envelope follower a representative energy measure.
-        //
-        // Using peakAbs is cheap; using RMS would be more accurate but cost more CPU.
+        // Envelope follower (tail energy proxy)
         float e = envFollower.process(peakAbs);
-        env01 = dsp::clampf(e * 2.0f, 0.0f, 1.0f); // scale to a handy 0..1 range
+        env01 = dsp::clampf(e * 2.0f, 0.0f, 1.0f);
 
-        // --------------------------------------------------------------------------
-        // 2) Mix y[] through matrix (Hadamard or Householder)
-        // --------------------------------------------------------------------------
-        //
-        // This is the key “density” mechanism: it spreads energy across lines.
-        //
+        // ----------------------------------------------------------------------
+        // 2) Mix through matrix (density)
+        // ----------------------------------------------------------------------
         mix(y, N, cfg.matrix);
 
-        // --------------------------------------------------------------------------
-        // 3) Compute dynamic damping cutoff (optional)
-        // --------------------------------------------------------------------------
-        //
-        // Dynamic damping = brightness changes with excitation.
-        // If enabled, compute a new effective dampHz based on env.
-        float dampHzEffective = cfg.dampHz;
+        // ----------------------------------------------------------------------
+        // 3) Dynamic damping (compute ONCE per sample, apply cheaply)
+        // ----------------------------------------------------------------------
+        float dampHzEffective = dsp::clampf(cfg.dampHz, 20.0f, 0.49f * sr);
         if (cfg.dynEnable > 0.0001f) {
             dampHzEffective = computeDynamicDampingHz(cfg.dampHz, env01);
         }
 
-        // Update low-pass filter cutoff per line.
-        // (Yes, this is inside processSample; but it’s still cheap for N=8/16.
-        // If you want later optimization, we can update per block and smooth.)
+        // Smooth damping to avoid zippering
+        dynDampHzCurrent = 0.995f * dynDampHzCurrent + 0.005f * dampHzEffective;
+
+        // Compute 1-pole coefficient ONCE and apply to each line filter.
+        float aLP = std::exp(-2.0f * dsp::kPi * dynDampHzCurrent / sr);
         for (int i = 0; i < N; ++i) {
-            lp[i].setCutoff(dampHzEffective, sr);
+            lp[i].a = aLP;
         }
 
-        // --------------------------------------------------------------------------
-        // 4) Write back into delay lines (feedback + injection)
-        // --------------------------------------------------------------------------
-        //
-        // Each line receives:
-        //   x = inj + feedbackSignal
-        //
-        // feedbackSignal is:
-        //   - the mixed signal y[i]
-        //   - filtered (HP then LP)
-        //   - split into low/mid/high bands
-        //   - each band scaled by its decay multiplier
-        //   - recombined
-        //   - optionally saturated
-        //
-        // Why multiband decay?
-        //   Real spaces absorb highs quickly, and lows can linger longer.
-        //
-        // We do:
-        //   low  = LP(xLoHz)
-        //   low+mid = LP(xHiHz)
-        //   mid = (low+mid) - low
-        //   high = input - (low+mid)
-        //
-        // Then:
-        //   fb = low*decLow + mid*decMid + high*decHigh
-        //
-        // Where decLow = baseDecay*decayLowMul, etc.
-        //
+        // ----------------------------------------------------------------------
+        // 4) Feedback writeback: HP -> LP -> multiband decay -> optional saturation
+        // ----------------------------------------------------------------------
         float decLow = dsp::clampf(baseDecay * cfg.decayLowMul, 0.0f, 0.9997f);
         float decMid = dsp::clampf(baseDecay * cfg.decayMidMul, 0.0f, 0.9997f);
         float decHigh = dsp::clampf(baseDecay * cfg.decayHighMul, 0.0f, 0.9997f);
 
-        // We distribute injection across lines so the tank builds faster and evenly.
-        float injPerLine = inj / float(N);
+        const float injPerLine = inj / float(N);
 
         for (int i = 0; i < N; ++i) {
             float fb = y[i];
 
-            // Feedback HP (remove rumble / DC)
             fb = hp[i].process(fb);
-
-            // Feedback LP (damping - already configured to dampHzEffective)
             fb = lp[i].process(fb);
 
-            // Multiband split
             float low = xLo[i].process(fb);
             float lowMid = xHi[i].process(fb);
 
             float mid = lowMid - low;
             float high = fb - lowMid;
 
-            // Apply multiband decays
-            float fbColored = low * decLow
-                + mid * decMid
-                + high * decHigh;
+            float fbColored = low * decLow + mid * decMid + high * decHigh;
 
-            // Optional saturation inside the feedback loop.
-            // This can add "density" and prevent sterile tails.
-            //
-            // satMix:
-            //   0 => clean feedback (fbColored)
-            //   1 => fully saturated feedback
             float sat = dsp::softSat(fbColored, cfg.drive);
             float fbFinal = (1.0f - cfg.satMix) * fbColored + cfg.satMix * sat;
 
-            // Combine injection + feedback
-            float x = injPerLine + fbFinal;
-
-            // Push into delay line (write head)
-            d[i].push(x);
+            d[i].push(injPerLine + fbFinal);
         }
     }
 

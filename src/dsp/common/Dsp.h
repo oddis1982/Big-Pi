@@ -3,38 +3,6 @@
   =============================================================================
   Dsp.h — Big Pi DSP Primitives (header-only, heavily annotated)
   =============================================================================
-
-  This header provides the building blocks used across Big Pi:
-
-    - Utility math (clamp, dB conversions)
-    - Parameter smoothing (avoid clicks/zipper noise)
-    - Filters:
-        * One-pole LP/HP (cheap damping & rumble removal)
-        * Biquad shelves (tone shaping in OutputStage)
-    - Envelope follower (ducking, loudness comp, dynamic damping)
-    - Allpass diffuser (diffusion / density)
-    - DelayLine with cubic interpolation (fractional delay for modulation)
-    - MultiLFO (per-line sinusoidal modulation)
-    - SmoothNoise (smoothed random modulation for jitter)
-    - StereoSpinner (slow random stereo rotation)
-    - Soft saturation (tanh-based, “glue/density”)
-
-  Why header-only?
-    - Most functions are small and benefit from inlining.
-    - No separate Dsp.cpp is required or expected.
-
-  Scientific concepts (novice-friendly overview):
-    - Sampling: audio is processed as discrete samples x[n]
-    - Filters are difference equations (depend on past values)
-    - Smoothing is a low-pass filter applied to control signals
-    - Fractional delay requires interpolation (delay time not an integer)
-    - Diffusion uses allpass networks to scramble phase without big EQ change
-    - Modulation reduces stationary resonances (less metallic ringing)
-    - Nonlinearity creates harmonics; gentle saturation can add density
-
-  Real-time safety:
-    - No allocations inside per-sample processing
-    - Avoid expensive operations inside tight loops where possible
 */
 
 #include <vector>
@@ -42,15 +10,34 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
+#include <cstring> // std::memcpy
 
 namespace dsp {
+
+    // ============================================================================
+    // Constants
+    // ============================================================================
+
+    constexpr float kPi = 3.14159265358979323846f;
 
     // ============================================================================
     // Basic helpers
     // ============================================================================
 
-    inline float clampf(float x, float lo, float hi) {
+    template <typename T>
+    inline T clamp(T x, T lo, T hi) {
         return std::max(lo, std::min(hi, x));
+    }
+
+    // Convenience overload for float.
+    // (We keep this because most DSP parameters are float.)
+    inline float clampf(float x, float lo, float hi) {
+        return clamp<float>(x, lo, hi);
+    }
+
+    // Handy for UI parameters.
+    inline float clamp01(float x) {
+        return clampf(x, 0.0f, 1.0f);
     }
 
     inline float dbToLin(float db) {
@@ -64,50 +51,28 @@ namespace dsp {
         return 20.0f * std::log10(lin);
     }
 
-    /*
-      curve01(x, shape)
-      -----------------
-      Remaps a 0..1 control curve so knobs feel more "musical".
-
-      shape > 1  => more resolution near 0 (slow start)
-      shape < 1  => more resolution near 1 (fast start)
-    */
     inline float curve01(float x01, float shape) {
         x01 = clampf(x01, 0.0f, 1.0f);
         shape = clampf(shape, 0.05f, 10.0f);
         return std::pow(x01, shape);
     }
 
+    // Denormal helper (optional but useful for reverbs)
+    inline float killDenorm(float x) {
+        return (std::abs(x) < 1e-20f) ? 0.0f : x;
+    }
+
     // ============================================================================
-    // Parameter smoothing (control-rate low-pass filter)
+    // Parameter smoothing
     // ============================================================================
 
-    /*
-      SmoothValue
-      ----------
-      Smoothly approaches a target value.
-
-      Equation:
-        y[n] = a*y[n-1] + (1-a)*x[n]
-
-      Where "x[n]" is the target and "y[n]" is the smoothed value.
-
-      Choosing a:
-        a = exp(-1 / (T * sr))
-      where:
-        - T is a time constant (seconds)
-        - sr is sample rate
-
-      Intuition:
-        Larger T => a closer to 1 => slower smoothing.
-    */
     struct SmoothValue {
         float y = 0.0f;
         float a = 0.0f;
         float sr = 48000.0f;
 
         void setTimeMs(float ms, float sampleRate) {
-            sr = sampleRate;
+            sr = (sampleRate <= 1.0f) ? 48000.0f : sampleRate;
             float sec = std::max(ms, 0.001f) * 0.001f;
             a = std::exp(-1.0f / (sec * sr));
         }
@@ -121,21 +86,9 @@ namespace dsp {
     };
 
     // ============================================================================
-    // One-pole filters (cheap and stable)
+    // One-pole filters
     // ============================================================================
 
-    /*
-      OnePoleLP:
-        z = a*z + (1-a)*x
-
-      OnePoleHP:
-        y = x - LP(x)
-
-      Used heavily in reverbs because:
-        - very cheap
-        - stable
-        - great for damping highs and removing rumble
-    */
     struct OnePoleLP {
         float z = 0.0f;
         float a = 0.0f;
@@ -144,11 +97,12 @@ namespace dsp {
 
         void setCutoff(float hz, float sr) {
             hz = clampf(hz, 5.0f, 0.49f * sr);
-            a = std::exp(-2.0f * float(M_PI) * hz / sr);
+            a = std::exp(-2.0f * kPi * hz / sr);
         }
 
         float process(float x) {
             z = a * z + (1.0f - a) * x;
+            z = killDenorm(z);
             return z;
         }
     };
@@ -161,31 +115,20 @@ namespace dsp {
 
         void setCutoff(float hz, float sr) {
             hz = clampf(hz, 5.0f, 0.49f * sr);
-            a = std::exp(-2.0f * float(M_PI) * hz / sr);
+            a = std::exp(-2.0f * kPi * hz / sr);
         }
 
         float process(float x) {
-            z = a * z + (1.0f - a) * x; // low-pass state
-            return x - z;              // high-pass output
+            z = a * z + (1.0f - a) * x;
+            z = killDenorm(z);
+            return x - z;
         }
     };
 
     // ============================================================================
-    // Biquad (RBJ cookbook style) — used for shelves in OutputStage
+    // Biquad (DF2T)
     // ============================================================================
 
-    /*
-      Biquad: second-order IIR filter.
-
-      We use Direct Form II Transposed:
-        y = b0*x + z1
-        z1 = b1*x - a1*y + z2
-        z2 = b2*x - a2*y
-
-      Notes:
-        - a0 is normalized to 1.0
-        - coefficients computed using well-known RBJ formulas
-    */
     struct Biquad {
         float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f;
         float a1 = 0.0f, a2 = 0.0f;
@@ -197,12 +140,15 @@ namespace dsp {
             float y = b0 * x + z1;
             z1 = b1 * x - a1 * y + z2;
             z2 = b2 * x - a2 * y;
+
+            z1 = killDenorm(z1);
+            z2 = killDenorm(z2);
             return y;
         }
 
         static void omega(float hz, float sr, float& w0, float& c, float& s) {
             hz = clampf(hz, 5.0f, 0.49f * sr);
-            w0 = 2.0f * float(M_PI) * (hz / sr);
+            w0 = 2.0f * kPi * (hz / sr);
             c = std::cos(w0);
             s = std::sin(w0);
         }
@@ -279,7 +225,7 @@ namespace dsp {
     };
 
     // ============================================================================
-    // Envelope follower (for dynamics/ducking/loudness)
+    // Envelope follower
     // ============================================================================
 
     struct EnvelopeFollower {
@@ -288,7 +234,9 @@ namespace dsp {
         float aAtk = 0.0f;
         float aRel = 0.0f;
 
-        void setSampleRate(float sampleRate) { sr = sampleRate; }
+        void setSampleRate(float sampleRate) {
+            sr = (sampleRate <= 1.0f) ? 48000.0f : sampleRate;
+        }
 
         void setAttackReleaseMs(float attackMs, float releaseMs) {
             attackMs = std::max(attackMs, 0.1f);
@@ -307,12 +255,13 @@ namespace dsp {
             float mag = std::abs(x);
             float a = (mag > env) ? aAtk : aRel;
             env = a * env + (1.0f - a) * mag;
+            env = killDenorm(env);
             return env;
         }
     };
 
     // ============================================================================
-    // Allpass diffuser (delay-based)
+    // Allpass diffuser
     // ============================================================================
 
     struct Allpass {
@@ -322,6 +271,7 @@ namespace dsp {
         float g = 0.7f;
         float delaySamp = 200.0f;
 
+        // Real-time rule: call init() only in prepare(), not in per-sample code.
         void init(int maxDelaySamples) {
             buf.assign(std::max(1, maxDelaySamples), 0.0f);
             idx = 0;
@@ -333,6 +283,8 @@ namespace dsp {
         }
 
         float process(float x) {
+            if (buf.size() < 2) return x;
+
             int d = int(clampf(delaySamp, 1.0f, float(buf.size() - 1)));
 
             int r = idx - d;
@@ -340,9 +292,6 @@ namespace dsp {
 
             float v = buf[r];
 
-            // Classic allpass:
-            // y = -g*x + v
-            // buf[idx] = x + g*y
             float y = -g * x + v;
             buf[idx] = x + g * y;
 
@@ -354,7 +303,7 @@ namespace dsp {
     };
 
     // ============================================================================
-    // Delay line with cubic interpolation (fractional delay support)
+    // Delay line with cubic interpolation
     // ============================================================================
 
     struct DelayLine {
@@ -372,12 +321,15 @@ namespace dsp {
         }
 
         void push(float x) {
+            if (buf.empty()) return;
             buf[w] = x;
             w++;
             if (w >= (int)buf.size()) w = 0;
         }
 
         float readFracCubic(float delaySamples) const {
+            if (buf.size() < 4) return 0.0f;
+
             delaySamples = clampf(delaySamples, 0.0f, float(buf.size() - 4));
 
             float rp = float(w) - delaySamples;
@@ -393,7 +345,6 @@ namespace dsp {
 
             float y0 = buf[i0], y1 = buf[i1], y2 = buf[i2], y3 = buf[i3];
 
-            // Cubic Hermite interpolation (smooth fractional delay)
             float m1 = 0.5f * (y2 - y0);
             float m2 = 0.5f * (y3 - y1);
 
@@ -410,7 +361,7 @@ namespace dsp {
     };
 
     // ============================================================================
-    // Multi LFO bank (sin oscillators for modulation)
+    // Multi LFO bank
     // ============================================================================
 
     struct MultiLFO {
@@ -422,15 +373,15 @@ namespace dsp {
 
         void init(int n, float sampleRate) {
             count = std::max(1, n);
-            sr = sampleRate;
+            sr = (sampleRate <= 1.0f) ? 48000.0f : sampleRate;
 
             phase.assign(count, 0.0f);
             rateMul.assign(count, 1.0f);
 
             for (int i = 0; i < count; ++i) {
                 float t = (count == 1) ? 0.0f : float(i) / float(count - 1);
-                rateMul[i] = 0.85f + 0.30f * t;                 // spread rates
-                phase[i] = (2.0f * float(M_PI)) * (t + 0.13f); // spread phases
+                rateMul[i] = 0.85f + 0.30f * t;
+                phase[i] = (2.0f * kPi) * (t + 0.13f);
             }
         }
 
@@ -438,19 +389,19 @@ namespace dsp {
             i = std::max(0, std::min(i, count - 1));
 
             float hz = baseRateHz * rateMul[i];
-            float inc = (2.0f * float(M_PI) * hz) / sr;
+            float inc = (2.0f * kPi * hz) / sr;
 
             float y = std::sin(phase[i]);
 
             phase[i] += inc;
-            if (phase[i] >= 2.0f * float(M_PI)) phase[i] -= 2.0f * float(M_PI);
+            if (phase[i] >= 2.0f * kPi) phase[i] -= 2.0f * kPi;
 
-            return y; // [-1, 1]
+            return y;
         }
     };
 
     // ============================================================================
-    // Soft saturation (tanh-based “glue”)
+    // Soft saturation
     // ============================================================================
 
     inline float softSat(float x, float drive) {
@@ -459,13 +410,12 @@ namespace dsp {
         float y = x * (1.0f + drive);
         y = std::tanh(y);
 
-        // Normalize to keep level predictable as drive changes.
         float norm = 1.0f / std::tanh(1.0f + drive);
         return y * norm;
     }
 
     // ============================================================================
-    // SmoothNoise (smoothed random modulation source)
+    // SmoothNoise
     // ============================================================================
 
     struct SmoothNoise {
@@ -480,7 +430,9 @@ namespace dsp {
 
         float a = 0.0f;
 
-        void setSampleRate(float sampleRate) { sr = sampleRate; }
+        void setSampleRate(float sampleRate) {
+            sr = (sampleRate <= 1.0f) ? 48000.0f : sampleRate;
+        }
 
         void setRateHz(float hz) {
             rateHz = clampf(hz, 0.01f, 20.0f);
@@ -503,14 +455,14 @@ namespace dsp {
         }
 
         float nextRandBipolar() {
-            // Fast LCG RNG (good enough for modulation noise)
             rng = 1664525u * rng + 1013904223u;
 
-            // Convert bits -> float in [0,1)
-            uint32_t r = (rng >> 9) | 0x3F800000u;
-            float f = (*(float*)&r) - 1.0f;
-
-            return 2.0f * f - 1.0f;
+            // Safe bit-cast to float in [1, 2)
+            uint32_t bits = (rng >> 9) | 0x3F800000u;
+            float f;
+            std::memcpy(&f, &bits, sizeof(float));
+            f -= 1.0f;               // [0, 1)
+            return 2.0f * f - 1.0f;  // [-1, 1)
         }
 
         float process() {
@@ -522,12 +474,13 @@ namespace dsp {
             }
 
             y = a * y + (1.0f - a) * target;
+            y = killDenorm(y);
             return clampf(y, -1.0f, 1.0f);
         }
     };
 
     // ============================================================================
-    // StereoSpinner (slow random stereo rotation)
+    // StereoSpinner
     // ============================================================================
 
     struct StereoSpinner {
@@ -538,7 +491,7 @@ namespace dsp {
         float a = 0.0f;
 
         void init(float sampleRate, uint32_t seed) {
-            sr = sampleRate;
+            sr = (sampleRate <= 1.0f) ? 48000.0f : sampleRate;
 
             noise.setSampleRate(sr);
             noise.seed(seed);
@@ -564,6 +517,7 @@ namespace dsp {
         float process() {
             float n = noise.process();
             smoothed = a * smoothed + (1.0f - a) * n;
+            smoothed = killDenorm(smoothed);
             return clampf(smoothed, -1.0f, 1.0f);
         }
 
@@ -578,4 +532,3 @@ namespace dsp {
     };
 
 } // namespace dsp
-#pragma once
