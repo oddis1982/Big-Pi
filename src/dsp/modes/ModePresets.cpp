@@ -104,38 +104,35 @@ namespace bigpi {
         } break;
 
         case Mode::Hall: {
-            // ---------------------------------------------------------------------
-            // Hall tuning pass (Roadmap 1.0 / Phase 1):
-            // - Slightly longer average delays (handled by delayScale + custom set in ReverbEngine.cpp)
-            // - Less "instant smear": slightly softer input diffusion coefficient
-            // - Subtle, slow modulation: reduce depth, reduce rate
-            // - Realistic tonal decay: lows hang longer, highs die sooner
-            // ---------------------------------------------------------------------
+            // Hall tuning pass (Roadmap 1.0 / Phase 1)
             cfg.tank.delayScale = 1.15f;
             cfg.tank.useHouseholder = true;
 
+            // Softer onset: slightly lower diffusion coefficient
             cfg.tank.inputDiffStages = 6;
             cfg.tank.inputDiffG = 0.68f;
 
+            // Late diffusion range
             cfg.tank.lateDiffMinG = 0.48f;
             cfg.tank.lateDiffMaxG = 0.74f;
 
+            // Slow, subtle modulation (avoid chorus wobble)
             cfg.tank.modDepthMs = 4.5f;
             cfg.tank.modRateHz = 0.18f;
 
+            // Tonal realism: lows linger, highs decay faster
             cfg.tank.decayLowMul = 1.12f;
             cfg.tank.decayMidMul = 1.00f;
             cfg.tank.decayHighMul = 0.86f;
 
+            // Suggested UI defaults
             cfg.defaultPreDelay = 25.0f;
             cfg.defaultDecay = 0.93f;
             cfg.defaultDamping = 9000.0f;
 
-            // Hall ER defaults: softer and a bit bigger than room
             cfg.defaultERLevel = 0.24f;
             cfg.defaultERSize = 0.70f;
 
-            // Keep default mod map (we refine further in ReverbEngine via jitter/output voicing)
             fillModMap_Default(cfg.tank.modDepthMul, cfg.tank.modRateMul);
         } break;
 

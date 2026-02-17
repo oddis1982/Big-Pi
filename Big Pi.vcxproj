@@ -127,6 +127,7 @@
     <Text Include="CMakeLists.txt" />
     <Text Include="Docs\Manifest.txt" />
     <Text Include="Docs\RoadMap.txt" />
+    <Text Include="LICENSE.txt" />
   </ItemGroup>
   <ItemDefinitionGroup />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
