@@ -249,6 +249,14 @@ namespace bigpi {
         } break;
 
         case Mode::Sky: {
+            // ------------------------------------------------------------------
+            // Kappa+Cloud Mod:
+            // Sky is the Cloud mode and is allowed to run the full 16-line tank.
+            // This is explicit here so future changes to global defaults (e.g. 8)
+            // won't accidentally downgrade Cloud density.
+            // ------------------------------------------------------------------
+            cfg.tank.delayLines = 16;
+
             cfg.tank.delayScale = 1.20f;
             cfg.tank.useHouseholder = true;
 
@@ -427,4 +435,5 @@ namespace bigpi {
     }
 
 } // namespace bigpi
+
 

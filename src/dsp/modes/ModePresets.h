@@ -54,7 +54,7 @@ namespace bigpi {
     struct TankConfig {
 
         // Delay network structure
-        int   delayLines = 16;         // 8 (Eco) or 16 (HQ)
+        int   delayLines = 8;          // 8 default; Cloud (Sky) may use 16
         float delayScale = 1.0f;       // scales base delay set
         bool  useHouseholder = true;   // else Hadamard
 
@@ -125,3 +125,4 @@ namespace bigpi {
     ModeConfig getModePreset(Mode m);
 
 } // namespace bigpi
+

@@ -1,4 +1,4 @@
-﻿﻿#include "Tank.h"
+﻿﻿﻿#include "Tank.h"
 
 /*
   =============================================================================
@@ -203,6 +203,28 @@ namespace bigpi::core {
             return;
         }
 
+        // Backwards-compatible path: uniform injection across lines.
+        const int N = std::max(1, std::min(cfg.lines, kMaxLines));
+
+        std::array<float, kMaxLines> injVec{};
+        injVec.fill(0.0f);
+
+        const float injPerLine = inj / float(N);
+        for (int i = 0; i < N; ++i) injVec[i] = injPerLine;
+
+        processSampleVec(injVec, baseDecay, lfoBank, yOut);
+    }
+
+    void Tank::processSampleVec(const std::array<float, kMaxLines>& injVec,
+        float baseDecay,
+        dsp::MultiLFO& lfoBank,
+        std::array<float, kMaxLines>& yOut)
+    {
+        if (!inited) {
+            yOut.fill(0.0f);
+            return;
+        }
+
         // Extra safety: cfg.lines should be clamped in setConfig(),
         // but guard here because this is the hottest function.
         const int N = std::max(1, std::min(cfg.lines, kMaxLines));
@@ -282,8 +304,6 @@ namespace bigpi::core {
         // happens when baseDecay * bandMul approaches 1.0.
         updateDecayGains(baseDecay);
 
-        const float injPerLine = inj / float(N);
-
         for (int i = 0; i < N; ++i) {
             float fb = y[i];
 
@@ -305,7 +325,7 @@ namespace bigpi::core {
             float sat = dsp::softSat(fbColored, cfg.drive);
             float fbFinal = (1.0f - cfg.satMix) * fbColored + cfg.satMix * sat;
 
-            d[i].push(injPerLine + fbFinal);
+            d[i].push(injVec[i] + fbFinal);
         }
     }
 

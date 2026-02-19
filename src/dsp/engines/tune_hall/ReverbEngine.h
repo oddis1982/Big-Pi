@@ -1,7 +1,7 @@
-#pragma once
+﻿#pragma once
 /*
   =============================================================================
-  ReverbEngine.h � Big Pi Reverb Platform Orchestrator (Kappa-level)
+  ReverbEngine.h — Big Pi Reverb Platform Orchestrator (Kappa-level)
   =============================================================================
 */
 
@@ -62,6 +62,13 @@ public:
         float erDampHz = 9000.0f;
         float erWidth = 1.0f;
 
+        // ---------------------------------------------------------------------
+        // Kappa+Cloud Mod (Step 1): decorrelated stereo tank injection depth
+        // 0.0 = legacy mono injection (M only)
+        // 1.0 = full MS vector injection (S drives a balanced +/- vector)
+        // ---------------------------------------------------------------------
+        float stereoDepth = 0.0f;
+
         float outHpHz = 20.0f;
         float outLowShelfHz = 200.0f;
         float outLowGainDb = 0.0f;
@@ -103,6 +110,18 @@ private:
 
     bigpi::ModeConfig modeCfg{};
 
+    // -------------------------------------------------------------------------
+    // Kappa+Cloud Mod (Step 1): MS decorrelated injection vectors
+    // vM: uniform distribution (sum = 1)
+    // vS: balanced +/- distribution (sum ≈ 0), shuffled deterministically
+    // injVec: per-line injection fed to Tank::processSampleVec()
+    // -------------------------------------------------------------------------
+    std::array<float, bigpi::core::kMaxLines> injVec{};
+    std::array<float, bigpi::core::kMaxLines> vM{};
+    std::array<float, bigpi::core::kMaxLines> vS{};
+    int lastStereoVecN = -1;
+    void rebuildStereoVectors(int lines);
+
     EarlyReflections er{};
     bigpi::core::Diffusion diffusion{};
     bigpi::core::Tank tank{};
@@ -125,4 +144,3 @@ private:
     float computeEffectiveDecay(float decay, float freeze01) const;
     float computeLoudnessCompDb(float decay01) const;
 };
-

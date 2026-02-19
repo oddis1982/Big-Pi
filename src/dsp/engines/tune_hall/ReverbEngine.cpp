@@ -1,11 +1,55 @@
-#include "dsp/engines/tune_hall/ReverbEngine.h"
+﻿#include "dsp/engines/tune_hall/ReverbEngine.h"
 
 #include <algorithm> // std::min, std::max
 #include <array>     // std::array
 #include <cmath>     // std::abs
+#include <cstdint>   // uint32_t
 
 static inline float msToSamples(float ms, float sr) {
     return ms * 0.001f * sr;
+}
+
+// -----------------------------------------------------------------------------
+// Kappa+Cloud Mod (Step 1): build MS injection vectors for current line count
+// -----------------------------------------------------------------------------
+void ReverbEngine::rebuildStereoVectors(int lines) {
+    lines = std::max(1, std::min(lines, bigpi::core::kMaxLines));
+    if (lines == lastStereoVecN) return;
+    lastStereoVecN = lines;
+
+    injVec.fill(0.0f);
+    vM.fill(0.0f);
+    vS.fill(0.0f);
+
+    const float invN = 1.0f / float(lines);
+
+    // Mid vector: uniform (sum = 1.0)
+    for (int i = 0; i < lines; ++i) vM[i] = invN;
+
+    // Deterministic shuffle so each mode has stable decorrelation
+    std::array<int, bigpi::core::kMaxLines> idx{};
+    for (int i = 0; i < lines; ++i) idx[i] = i;
+
+    uint32_t x = 0xC10UD00Du ^ (uint32_t(int(target.mode)) * 0x9E3779B9u);
+    auto rnd = [&]() -> uint32_t {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        return x;
+        };
+
+    for (int i = lines - 1; i > 0; --i) {
+        int j = int(rnd() % uint32_t(i + 1));
+        std::swap(idx[i], idx[j]);
+    }
+
+    // Side vector: balanced +/- (sum ≈ 0). For odd N, one extra negative.
+    const int posCount = lines / 2;
+    for (int k = 0; k < lines; ++k) {
+        const int i = idx[k];
+        const float sgn = (k < posCount) ? 1.0f : -1.0f;
+        vS[i] = sgn * invN;
+    }
 }
 
 void ReverbEngine::prepare(float sampleRate, int blockSize) {
@@ -128,6 +172,9 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
 
     bigpi::core::Tank::Config tc = tank.getConfig();
     tc.lines = modeCfg.tank.delayLines;
+
+    // Kappa+Cloud Mod (Step 1): ensure vectors match tank line count
+    rebuildStereoVectors(tc.lines);
 
     tc.matrix = modeCfg.tank.useHouseholder
         ? bigpi::core::MatrixType::Householder
@@ -318,6 +365,11 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
         // Cache tank config once per chunk (avoids repeated getConfig())
         const auto tc = tank.getConfig();
 
+        // Kappa+Cloud Mod (Step 1): make sure vectors match current tank size
+        rebuildStereoVectors(tc.lines);
+
+        const float gS = dsp::clampf(target.stereoDepth, 0.0f, 1.0f);
+
         for (int i = 0; i < chunk; ++i) {
             const float pL = wetL[i];
             const float pR = wetR[i];
@@ -330,9 +382,21 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
 
             diffusion.processInput(injL, injR);
 
-            const float injMono = 0.5f * (injL + injR);
+            // -----------------------------------------------------------------
+            // Kappa+Cloud Mod (Step 1): MS vector injection into tank
+            //
+            // M always feeds uniformly.
+            // S feeds a balanced +/- vector, scaled by StereoDepth.
+            // When input is mono (L==R), S==0 so behavior == legacy mono injection.
+            // -----------------------------------------------------------------
+            const float M = 0.5f * (injL + injR);
+            const float S = 0.5f * (injL - injR);
 
-            tank.processSample(injMono, effDecay, lfos, yVec);
+            for (int li = 0; li < tc.lines; ++li) {
+                injVec[li] = (M * vM[li]) + (S * gS) * vS[li];
+            }
+
+            tank.processSampleVec(injVec, effDecay, lfos, yVec);
 
             float tailL = 0.0f, tailR = 0.0f;
             bigpi::core::renderTapPattern(yVec, tc.lines, modeCfg.tank.tapPattern, tailL, tailR);
@@ -381,4 +445,3 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
         pos += chunk;
     }
 }
-

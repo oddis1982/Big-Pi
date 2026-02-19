@@ -1,8 +1,8 @@
-﻿// =========================== src/dsp/tail/Tank.h ============================
+﻿﻿﻿﻿// =========================== src/dsp/tail/Tank.h ============================
 #pragma once
 /*
   =============================================================================
-  Tank.h � Big Pi Late Reverb Tank (FDN-like delay network)
+  Tank.h — Big Pi Late Reverb Tank (FDN-like delay network)
   =============================================================================
 
   This module implements the "late reverb": the dense tail after early reflections.
@@ -26,9 +26,9 @@
   6) Jitter modulation:
        - smoothed random modulation on top of sinusoidal LFO
   7) Envelope follower:
-       - measures internal tank energy (tail �age� proxy)
+       - measures internal tank energy (tail “age” proxy)
   8) Optional saturation inside feedback:
-       - adds density and �glue�
+       - adds density and “glue”
 
   Real-time safety:
     - No allocations during processSample()
@@ -150,6 +150,18 @@ namespace bigpi::core {
             - Engine does: injection creation, tap rendering, diffusion/output stage
         */
         void processSample(float inj,
+            float baseDecay,
+            dsp::MultiLFO& lfoBank,
+            std::array<float, kMaxLines>& yOut);
+
+        /*
+          processSampleVec(injVec, baseDecay, lfoBank, yOut)
+          --------------------------------------------------
+          Kappa+Cloud Mod (Step 1):
+          Same tank processing, but injection is provided per delay line.
+          Only the first cfg.lines values are read.
+        */
+        void processSampleVec(const std::array<float, kMaxLines>& injVec,
             float baseDecay,
             dsp::MultiLFO& lfoBank,
             std::array<float, kMaxLines>& yOut);
