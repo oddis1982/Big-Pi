@@ -1,8 +1,8 @@
-// =========================== src/dsp/tail/Tank.h ============================
+ï»¿// =========================== src/dsp/tail/Tank.h ============================
 #pragma once
 /*
   =============================================================================
-  Tank.h — Big Pi Late Reverb Tank (FDN-like delay network)
+  Tank.h ï¿½ Big Pi Late Reverb Tank (FDN-like delay network)
   =============================================================================
 
   This module implements the "late reverb": the dense tail after early reflections.
@@ -26,9 +26,9 @@
   6) Jitter modulation:
        - smoothed random modulation on top of sinusoidal LFO
   7) Envelope follower:
-       - measures internal tank energy (tail “age” proxy)
+       - measures internal tank energy (tail ï¿½ageï¿½ proxy)
   8) Optional saturation inside feedback:
-       - adds density and “glue”
+       - adds density and ï¿½glueï¿½
 
   Real-time safety:
     - No allocations during processSample()
@@ -183,6 +183,22 @@ namespace bigpi::core {
 
         // Smoothed dynamic damping cutoff
         float dynDampHzCurrent = 9000.0f;
+
+        // ----------------------------------------------------------------------
+        // Kappa upgrade: RT60-based decay gains (stable, line-length aware)
+        // ----------------------------------------------------------------------
+        // We cache per-line feedback gains computed from a target RT60 (time to
+        // decay by 60 dB). This prevents runaway feedback when "decay multipliers"
+        // are > 1.0, because we treat those multipliers as RT60 scalers (seconds),
+        // not as direct feedback gains.
+        float lastDecay01 = -1.0f; // invalid forces a recompute
+
+        std::array<float, kMaxLines> fbGainLow{};
+        std::array<float, kMaxLines> fbGainMid{};
+        std::array<float, kMaxLines> fbGainHigh{};
+
+        // Recompute per-line gains if decay01 changes.
+        void updateDecayGains(float decay01);
 
         // Last outputs (debug/inspection; not required for sound)
         std::array<float, kMaxLines> lastY{};

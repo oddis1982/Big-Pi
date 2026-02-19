@@ -1,4 +1,4 @@
-﻿#include "Tank.h"
+﻿﻿#include "Tank.h"
 
 /*
   =============================================================================
@@ -10,6 +10,39 @@
 #include <cmath>     // std::abs, std::exp
 
 namespace bigpi::core {
+
+    // ----------------------------------------------------------------------
+    // Kappa upgrade: RT60-based decay model
+    // ----------------------------------------------------------------------
+    //
+    // Instead of treating the decay knob as a direct feedback gain, we treat it
+    // as a target RT60 (seconds). For each delay line, we compute the feedback
+    // gain that yields -60 dB after RT60 seconds:
+    //
+    //   gain = 0.001 ^ (delaySeconds / rt60Seconds)
+    //
+    // This is a classic, stable approach used in many high-quality reverbs.
+    // It prevents runaway feedback even when low/mid/high multipliers are > 1,
+    // because those multipliers scale *time* (RT60), not *gain*.
+    //
+    // Mapping of decay01 -> RT60:
+    //   0.0 -> ~0.2 s (very short)
+    //   1.0 -> ~12  s (long)
+    //
+    // (You can later re-tune these endpoints to taste.)
+    static inline float decay01ToRt60Sec(float decay01) {
+        decay01 = dsp::clampf(decay01, 0.0f, 1.0f);
+        const float rt60Min = 0.2f;
+        const float rt60Max = 12.0f;
+        const float ratio = rt60Max / rt60Min;
+        return rt60Min * std::pow(ratio, decay01);
+    }
+
+    static inline float rt60ToFeedbackGain(float delaySec, float rt60Sec) {
+        rt60Sec = std::max(0.01f, rt60Sec);
+        delaySec = std::max(0.0f, delaySec);
+        return std::exp(std::log(0.001f) * (delaySec / rt60Sec));
+    }
 
     void Tank::init(float sampleRate, int maxDelaySamples, uint32_t s) {
         sr = (sampleRate <= 1.0f) ? 48000.0f : sampleRate;
@@ -109,6 +142,9 @@ namespace bigpi::core {
 
         // Keep smoother state inside sane bounds
         dynDampHzCurrent = cfg.dampHz;
+
+        // Decay model cache invalidation (forces RT60 gain recompute)
+        lastDecay01 = -1.0f;
     }
 
     float Tank::computeDynamicDampingHz(float staticDampHz, float env01Now) {
@@ -121,6 +157,40 @@ namespace bigpi::core {
         float outHz = (1.0f - amt) * staticDampHz + amt * dynHz;
 
         return dsp::clampf(outHz, 20.0f, 0.49f * sr);
+    }
+
+    void Tank::updateDecayGains(float decay01) {
+        // Only recompute when the decay control changes.
+        // (This is called per-sample, so caching matters.)
+        if (decay01 == lastDecay01) return;
+        lastDecay01 = decay01;
+
+        // 1) Map knob to base RT60 in seconds.
+        const float rt60Base = decay01ToRt60Sec(decay01);
+
+        // 2) Interpret the band's "multipliers" as RT60 time scalers.
+        //    Example: decayLowMul = 1.12 means "low band decays 12% longer".
+        const float rt60Low = rt60Base * std::max(0.10f, cfg.decayLowMul);
+        const float rt60Mid = rt60Base * std::max(0.10f, cfg.decayMidMul);
+        const float rt60High = rt60Base * std::max(0.10f, cfg.decayHighMul);
+
+        const int N = std::max(1, std::min(cfg.lines, kMaxLines));
+
+        for (int i = 0; i < N; ++i) {
+            // Use the nominal delay length (without modulation) to derive gain.
+            // This keeps behavior stable and avoids recalculating per-line gains
+            // every time the LFO changes the fractional delay.
+            const float delaySec = std::max(1.0f, cfg.delaySamp[i]) / sr;
+
+            fbGainLow[i] = rt60ToFeedbackGain(delaySec, rt60Low);
+            fbGainMid[i] = rt60ToFeedbackGain(delaySec, rt60Mid);
+            fbGainHigh[i] = rt60ToFeedbackGain(delaySec, rt60High);
+
+            // Extra safety clamp: never allow unity gain.
+            fbGainLow[i] = dsp::clampf(fbGainLow[i], 0.0f, 0.9997f);
+            fbGainMid[i] = dsp::clampf(fbGainMid[i], 0.0f, 0.9997f);
+            fbGainHigh[i] = dsp::clampf(fbGainHigh[i], 0.0f, 0.9997f);
+        }
     }
 
     void Tank::processSample(float inj,
@@ -204,11 +274,13 @@ namespace bigpi::core {
         }
 
         // ----------------------------------------------------------------------
-        // 4) Feedback writeback: HP -> LP -> multiband decay -> optional saturation
+        // 4) Feedback writeback: HP -> LP -> multiband RT60 decay -> optional saturation
         // ----------------------------------------------------------------------
-        float decLow = dsp::clampf(baseDecay * cfg.decayLowMul, 0.0f, 0.9997f);
-        float decMid = dsp::clampf(baseDecay * cfg.decayMidMul, 0.0f, 0.9997f);
-        float decHigh = dsp::clampf(baseDecay * cfg.decayHighMul, 0.0f, 0.9997f);
+        //
+        // Kappa upgrade: compute stable per-line feedback gains from RT60.
+        // This prevents the "slow build then infinite sustain" problem that
+        // happens when baseDecay * bandMul approaches 1.0.
+        updateDecayGains(baseDecay);
 
         const float injPerLine = inj / float(N);
 
@@ -224,7 +296,11 @@ namespace bigpi::core {
             float mid = lowMid - low;
             float high = fb - lowMid;
 
-            float fbColored = low * decLow + mid * decMid + high * decHigh;
+            // Apply per-band gains derived from RT60 (time), not direct gain multipliers.
+            float fbColored =
+                low * fbGainLow[i] +
+                mid * fbGainMid[i] +
+                high * fbGainHigh[i];
 
             float sat = dsp::softSat(fbColored, cfg.drive);
             float fbFinal = (1.0f - cfg.satMix) * fbColored + cfg.satMix * sat;
