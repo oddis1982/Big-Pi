@@ -9,7 +9,6 @@ static inline float msToSamples(float ms, float sr) {
     return ms * 0.001f * sr;
 }
 
-
 // -----------------------------------------------------------------------------
 // Kappa+Cloud Mod (Step 1): build MS injection vectors for current line count
 // -----------------------------------------------------------------------------
@@ -66,7 +65,8 @@ void ReverbEngine::prepare(float sampleRate, int blockSize) {
     er.prepare(sr);
     outStage.prepare(sr);
 
-    int preMax = std::max(16, int(sr * 0.20f));
+    // Predelay buffer also doubles as the source for Cloud front-end multitap spray.
+    const int preMax = std::max(16, int(sr * 0.20f)); // 200 ms
     preL.init(preMax);
     preR.init(preMax);
 
@@ -78,20 +78,17 @@ void ReverbEngine::prepare(float sampleRate, int blockSize) {
     duckEnv.setAttackReleaseMs(8.0f, 120.0f);
     duckEnv.clear();
 
-    int maxTankDelay = std::max(64, int(sr * 2.5f));
+    const int maxTankDelay = std::max(64, int(sr * 2.5f));
     tank.init(sr, maxTankDelay, 0xC0FFEEu);
 
     // Apply preset defaults into target + tank config
     applyModePreset(target.mode);
 
-    // IMPORTANT:
-    // reset() must work during prepare(). It should not be gated by prepared==true.
     prepared = true;
     reset();
 }
 
 void ReverbEngine::reset() {
-    // Always reset if prepare() has been called. (prepare() sets prepared=true)
     if (!prepared) return;
 
     preL.clear();
@@ -106,7 +103,7 @@ void ReverbEngine::reset() {
 }
 
 void ReverbEngine::setParams(const Params& p) {
-    bool modeChanged = (p.mode != target.mode);
+    const bool modeChanged = (p.mode != target.mode);
     target = p;
 
     if (modeChanged) {
@@ -206,7 +203,7 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     if (m == bigpi::Mode::Hall) baseSet = baseMs16_Hall;
 
     for (int i = 0; i < 16; ++i) {
-        float ms = baseSet[i] * modeCfg.tank.delayScale;
+        const float ms = baseSet[i] * modeCfg.tank.delayScale;
         tc.delaySamp[i] = msToSamples(ms, sr);
     }
 
@@ -246,6 +243,17 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     }
     else {
         target.cloudEnable = 0.0f;
+    }
+
+    // Kappa+Cloud Mod (Step 3): Cloud front-end multitap defaults
+    if (m == bigpi::Mode::Sky) {
+        target.cloudFrontEnable = 1.0f;
+        target.cloudFrontAmount = 0.48f;
+        target.cloudFrontSizeMs = 24.0f;
+        target.cloudFrontWidth = 0.75f;
+    }
+    else {
+        target.cloudFrontEnable = 0.0f;
     }
 
     if (m == bigpi::Mode::Hall) {
@@ -320,7 +328,6 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     tc2.jitterRateHz = target.modJitterRateHz;
     tc2.jitterSmoothMs = target.modJitterSmoothMs;
 
-    // Kappa+Cloud Mod (Level 2): cloudify modulation controls
     tc2.cloudEnable = target.cloudEnable;
     tc2.cloudSpinHz = target.cloudSpinHz;
     tc2.cloudWanderAmount = target.cloudWanderAmount;
@@ -336,15 +343,15 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
 float ReverbEngine::computeEffectiveDecay(float decay, float freeze01) const {
     freeze01 = dsp::clampf(freeze01, 0.0f, 1.0f);
     decay = dsp::clampf(decay, 0.0f, 0.9995f);
-    float frozen = 0.9993f;
+    const float frozen = 0.9993f;
     return (1.0f - freeze01) * decay + freeze01 * frozen;
 }
 
 float ReverbEngine::computeLoudnessCompDb(float decay01) const {
     decay01 = dsp::clampf(decay01, 0.0f, 1.0f);
 
-    float strength = dsp::clampf(target.loudCompStrength, 0.0f, 1.0f);
-    float maxDb = dsp::clampf(target.loudCompMaxDb, 0.0f, 24.0f);
+    const float strength = dsp::clampf(target.loudCompStrength, 0.0f, 1.0f);
+    const float maxDb = dsp::clampf(target.loudCompMaxDb, 0.0f, 24.0f);
 
     return -maxDb * strength * decay01;
 }
@@ -356,6 +363,20 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
     if (!prepared) return;
     if (n <= 0) return;
 
+    // Step 3: Cloud front-end multitap pattern (fixed, RT-safe)
+    // Normalized offsets (0..1) scaled by cloudFrontSizeMs.
+    static constexpr int kCloudTaps = 8;
+    static constexpr float kTapPos[kCloudTaps] = {
+        0.06f, 0.12f, 0.20f, 0.31f, 0.45f, 0.62f, 0.80f, 1.00f
+    };
+    static constexpr float kTapGain[kCloudTaps] = {
+        0.90f, 0.78f, 0.66f, 0.56f, 0.48f, 0.40f, 0.34f, 0.28f
+    };
+    // Alternate stereo signs for small L/R offsets (creates width without hard panning).
+    static constexpr float kTapSign[kCloudTaps] = {
+        +1.0f, -1.0f, +1.0f, -1.0f, +1.0f, -1.0f, +1.0f, -1.0f
+    };
+
     // Real-time safety: never resize buffers here.
     // If n > block (allocated in prepare), process in chunks.
     int pos = 0;
@@ -364,7 +385,7 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
 
         const float preSamp = msToSamples(dsp::clampf(target.predelayMs, 0.0f, 200.0f), sr);
 
-        // Predelay stage
+        // Predelay stage (also fills the buffer used by cloud multitaps)
         for (int i = 0; i < chunk; ++i) {
             preL.push(inL[pos + i]);
             preR.push(inR[pos + i]);
@@ -386,8 +407,23 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
         const float duckDepthLin = dsp::dbToLin(-dsp::clampf(target.duckDepthDb, 0.0f, 36.0f));
         const float duckThreshLin = dsp::dbToLin(dsp::clampf(target.duckThresholdDb, -80.0f, 0.0f));
 
-        // Control parameter: set once per chunk (not per-sample)
+        // Set diffusion time-varying parameter once per chunk
         diffusion.setTimeVaryingG(target.inputDiffG);
+
+        // Fetch tank config once per chunk
+        const auto tcNow = tank.getConfig();
+        rebuildStereoVectors(tcNow.lines);
+
+        // Cache a few controls
+        const float gS = dsp::clampf(target.stereoDepth, 0.0f, 1.0f);
+
+        const float cfEnable = (target.cloudFrontEnable > 0.0001f) ? 1.0f : 0.0f;
+        const float cfAmt = dsp::clampf(target.cloudFrontAmount, 0.0f, 1.0f) * cfEnable;
+        const float cfSizeSamp = msToSamples(dsp::clampf(target.cloudFrontSizeMs, 0.0f, 120.0f), sr);
+        const float cfWidth = dsp::clampf(target.cloudFrontWidth, 0.0f, 1.0f);
+
+        // Convert width into a small time skew (samples). Keep subtle to avoid combiness.
+        const float widthSkewSamp = cfWidth * msToSamples(0.45f, sr); // up to ~0.45 ms
 
         for (int i = 0; i < chunk; ++i) {
             const float pL = wetL[i];
@@ -396,20 +432,47 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
             const float eL = erL[i];
             const float eR = erR[i];
 
-            float injL = pL + eL * 0.65f;
-            float injR = pR + eR * 0.65f;
+            // -----------------------------------------------------------------
+            // Step 3: Cloud front-end multitap "spray" from the predelay buffer
+            // We read additional micro-taps around the predelay point.
+            // -----------------------------------------------------------------
+            float sprayL = 0.0f;
+            float sprayR = 0.0f;
+
+            if (cfAmt > 0.0f && cfSizeSamp > 0.0f) {
+                // "Center" taps at the predelay read point; spread backward in time.
+                // (Older samples are larger delay values.)
+                for (int t = 0; t < kCloudTaps; ++t) {
+                    const float dt = kTapPos[t] * cfSizeSamp;
+                    const float sign = kTapSign[t];
+                    const float skew = sign * widthSkewSamp;
+
+                    const float dL = std::max(1.0f, preSamp + dt + skew);
+                    const float dR = std::max(1.0f, preSamp + dt - skew);
+
+                    const float tapL = preL.readFracCubic(dL);
+                    const float tapR = preR.readFracCubic(dR);
+
+                    sprayL += kTapGain[t] * tapL;
+                    sprayR += kTapGain[t] * tapR;
+                }
+
+                // Keep spray level controlled (avoid big level jumps).
+                // 0.22 is a conservative normalization for 8 taps with those gains.
+                sprayL *= 0.22f;
+                sprayR *= 0.22f;
+            }
+
+            // Build injection (predelay + ER + cloud spray)
+            float injL = pL + eL * 0.65f + cfAmt * sprayL;
+            float injR = pR + eR * 0.65f + cfAmt * sprayR;
 
             diffusion.processInput(injL, injR);
 
-            // Kappa+Cloud Mod (Step 1): MS decorrelated vector injection into tank
+            // Step 1: MS decorrelated vector injection into tank
             const float M = 0.5f * (injL + injR);
             const float S = 0.5f * (injL - injR);
 
-            // Ensure vectors match current tank size (safe for runtime mode changes)
-            const auto tcNow = tank.getConfig();
-            rebuildStereoVectors(tcNow.lines);
-
-            const float gS = dsp::clampf(target.stereoDepth, 0.0f, 1.0f);
             for (int li = 0; li < tcNow.lines; ++li) {
                 injVec[li] = (M * vM[li]) + (S * gS) * vS[li];
             }

@@ -1,7 +1,7 @@
 ﻿#pragma once
 /*
   =============================================================================
-  ReverbEngine.h — Big Pi Reverb Platform Orchestrator (Kappa-level)
+  ReverbEngine.h — Big Pi Reverb Platform Orchestrator (Kappa+Cloud Mod)
   =============================================================================
 */
 
@@ -62,27 +62,37 @@ public:
         float erDampHz = 9000.0f;
         float erWidth = 1.0f;
 
-
         // ---------------------------------------------------------------------
-        // Kappa+Cloud Mod (Step 1): decorrelated stereo tank injection depth
+        // Kappa+Cloud Mod — Step 1: decorrelated stereo tank injection depth
         // 0.0 = legacy mono injection (M only)
         // 1.0 = full MS vector injection (S drives a balanced +/- vector)
         // ---------------------------------------------------------------------
         float stereoDepth = 0.0f;
 
         // ---------------------------------------------------------------------
-        // Kappa+Cloud Mod (Level 2): "Cloudify" modulation controls
-        // cloudEnable: enables slow spatial drift (spin + wander) inside the tank
-        // cloudSpinHz: global rotation rate (very slow, ~0.01..0.20 Hz)
-        // cloudWanderAmount: per-line random drift amount (0..1, scaled by modDepth)
-        // cloudWanderRateHz: rate of the drift noise
-        // cloudWanderSmoothMs: smoothing of the drift noise
+        // Kappa+Cloud Mod — Level 2: Cloudify modulation (Spin + Wander)
         // ---------------------------------------------------------------------
         float cloudEnable = 0.0f;
         float cloudSpinHz = 0.045f;
         float cloudWanderAmount = 0.55f;
         float cloudWanderRateHz = 0.08f;
         float cloudWanderSmoothMs = 500.0f;
+
+        // ---------------------------------------------------------------------
+        // Kappa+Cloud Mod — Step 3: Cloud front-end multitap "spray"
+        //
+        // This runs BEFORE diffusion/tank injection, producing clustered micro-taps
+        // from the predelay buffer to "cloudify" the input.
+        //
+        // cloudFrontEnable: enables the front-end spray
+        // cloudFrontAmount: mix amount (0..1)
+        // cloudFrontSizeMs: spread of taps in ms (typical 8..60 ms)
+        // cloudFrontWidth: L/R tap offset / stereo spread (0..1)
+        // ---------------------------------------------------------------------
+        float cloudFrontEnable = 0.0f;
+        float cloudFrontAmount = 0.45f;
+        float cloudFrontSizeMs = 22.0f;
+        float cloudFrontWidth = 0.70f;
 
         float outHpHz = 20.0f;
         float outLowShelfHz = 200.0f;
@@ -126,17 +136,13 @@ private:
     bigpi::ModeConfig modeCfg{};
 
     // -------------------------------------------------------------------------
-    // Kappa+Cloud Mod (Step 1): MS decorrelated injection vectors
-    // vM: uniform distribution (sum = 1)
-    // vS: balanced +/- distribution (sum ≈ 0), shuffled deterministically per mode
-    // injVec: per-line injection fed to Tank::processSampleVec()
+    // Kappa+Cloud Mod — Step 1: MS decorrelated injection vectors
     // -------------------------------------------------------------------------
     std::array<float, bigpi::core::Tank::kMaxLines> injVec{};
     std::array<float, bigpi::core::Tank::kMaxLines> vM{};
     std::array<float, bigpi::core::Tank::kMaxLines> vS{};
     int lastStereoVecN = -1;
     void rebuildStereoVectors(int lines);
-
 
     EarlyReflections er{};
     bigpi::core::Diffusion diffusion{};
