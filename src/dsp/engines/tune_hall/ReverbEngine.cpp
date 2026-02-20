@@ -83,6 +83,16 @@ void ReverbEngine::prepare(float sampleRate, int blockSize) {
     duckEnv.setAttackReleaseMs(8.0f, 120.0f);
     duckEnv.clear();
 
+    // Step 6: dynamic diffusion helpers
+    diffFast.setSampleRate(sr);
+    diffSlow.setSampleRate(sr);
+    // fast/slow pair for transient detection
+    diffFast.setAttackReleaseMs(2.0f, 35.0f);
+    diffSlow.setAttackReleaseMs(18.0f, 220.0f);
+    diffFast.clear();
+    diffSlow.clear();
+    tailEnvSm = 0.0f;
+
     const int maxTankDelay = std::max(64, int(sr * 2.5f));
     tank.init(sr, maxTankDelay, 0xC0FFEEu);
 
@@ -108,6 +118,10 @@ void ReverbEngine::reset() {
     outStage.reset();
 
     duckEnv.clear();
+
+    diffFast.clear();
+    diffSlow.clear();
+    tailEnvSm = 0.0f;
 }
 
 void ReverbEngine::setParams(const Params& p) {
@@ -208,10 +222,7 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
       109.7f, 117.1f, 125.9f, 137.3f
     };
 
-    // Step 4: Cloud delay-line set (designed to be more "de-correlated" and less clustered)
-    // - avoids near-harmonic groupings
-    // - spreads energy more evenly across a wider window
-    // - still sits in a plausible late-reverb range
+    // Step 4: Cloud delay-line set
     static const float baseMs16_Cloud[16] = {
       27.9f, 33.6f, 39.2f, 44.9f,
       51.7f, 57.4f, 63.8f, 70.9f,
@@ -222,7 +233,6 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     const float* baseSet = baseMs16_Default;
     if (m == bigpi::Mode::Hall) baseSet = baseMs16_Hall;
 
-    // If Sky and enabled, use Cloud delay set.
     if (m == bigpi::Mode::Sky && target.cloudDelaySetEnable > 0.0001f) {
         baseSet = baseMs16_Cloud;
     }
@@ -292,6 +302,21 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     }
     else {
         target.cloudSmearEnable = 0.0f;
+    }
+
+    // Step 6 defaults (Sky gets full dynamic diffusion polish)
+    if (m == bigpi::Mode::Sky) {
+        target.dynDiffEnable = 1.0f;
+        target.dynDiffTailBoost = 0.45f;
+        target.dynDiffTransientReduce = 0.35f;
+        target.dynDiffLateBoost = 0.40f;
+    }
+    else {
+        // Still useful on other modes, but keep subtle.
+        target.dynDiffEnable = 1.0f;
+        target.dynDiffTailBoost = 0.20f;
+        target.dynDiffTransientReduce = 0.25f;
+        target.dynDiffLateBoost = 0.20f;
     }
 
     // Push configs now
@@ -423,9 +448,6 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
         const float duckDepthLin = dsp::dbToLin(-dsp::clampf(target.duckDepthDb, 0.0f, 36.0f));
         const float duckThreshLin = dsp::dbToLin(dsp::clampf(target.duckThresholdDb, -80.0f, 0.0f));
 
-        // Set diffusion time-varying parameter once per chunk
-        diffusion.setTimeVaryingG(target.inputDiffG);
-
         // Fetch tank config once per chunk
         const auto tcNow = tank.getConfig();
         rebuildStereoVectors(tcNow.lines);
@@ -445,6 +467,16 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
         const float smearWidth = dsp::clampf(target.cloudSmearWidth, 0.0f, 1.0f);
         const float smearSkewSamp = smearWidth * msToSamples(0.60f, sr); // up to ~0.6 ms
 
+        // Step 6 controls (cache per chunk)
+        const float dynOn = (target.dynDiffEnable > 0.0001f) ? 1.0f : 0.0f;
+        const float tailBoost = dsp::clampf(target.dynDiffTailBoost, 0.0f, 1.0f) * dynOn;
+        const float transReduce = dsp::clampf(target.dynDiffTransientReduce, 0.0f, 1.0f) * dynOn;
+        const float lateBoost = dsp::clampf(target.dynDiffLateBoost, 0.0f, 1.0f) * dynOn;
+
+        // Tail env smoothing coefficient (small, stable)
+        // (Equivalent to ~30–60 ms “feel” without adding another filter object.)
+        const float tailSmA = 0.995f;
+
         for (int i = 0; i < chunk; ++i) {
             const float pL = wetL[i];
             const float pR = wetR[i];
@@ -452,7 +484,9 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
             const float eL = erL[i];
             const float eR = erR[i];
 
+            // -----------------------------------------------------------------
             // Step 3: Cloud front-end multitap spray from predelay buffer
+            // -----------------------------------------------------------------
             float sprayL = 0.0f;
             float sprayR = 0.0f;
 
@@ -481,6 +515,37 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
             float injL = pL + eL * 0.65f + cfAmt * sprayL;
             float injR = pR + eR * 0.65f + cfAmt * sprayR;
 
+            // -----------------------------------------------------------------
+            // Step 6: Dynamic diffusion refinement (input diffusion g per-sample)
+            // - transient detector from input (fast - slow env)
+            // - tail energy from tank (previous samples), smoothed
+            // -----------------------------------------------------------------
+            float inputMono = 0.5f * (std::abs(injL) + std::abs(injR));
+            float f = diffFast.process(inputMono);
+            float s = diffSlow.process(inputMono);
+
+            // transient proxy: normalized fast-slow difference
+            // (scale chosen to be musical and stable across typical pedal levels)
+            float transient01 = dsp::clampf((f - s) * 6.0f, 0.0f, 1.0f);
+
+            float tailRaw = dsp::clampf(tank.getEnv01(), 0.0f, 1.0f);
+            tailEnvSm = tailSmA * tailEnvSm + (1.0f - tailSmA) * tailRaw;
+            tailEnvSm = dsp::killDenorm(tailEnvSm);
+
+            // Compute dynamic g around the knob value
+            float gBase = dsp::clampf(target.inputDiffG, 0.30f, 0.85f);
+
+            // Tail boost increases diffusion as the tank gets denser
+            float gTail = gBase * (1.0f + tailBoost * (0.35f + 0.65f * tailEnvSm));
+
+            // Transient reduce pulls diffusion down on pick attacks
+            float gTrans = gTail * (1.0f - transReduce * 0.55f * transient01);
+
+            float gDyn = dsp::clampf(gTrans, 0.30f, 0.85f);
+
+            // Apply per-sample time-varying diffusion g
+            diffusion.setTimeVaryingG(gDyn);
+
             diffusion.processInput(injL, injR);
 
             // Step 1: MS decorrelated vector injection into tank
@@ -498,9 +563,6 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
 
             // -----------------------------------------------------------------
             // Step 5: Optional post-tank micro-smear
-            // - push current tail into a short buffer
-            // - read a few micro-taps and mix back in
-            // - placed before late diffusion for a smoother "cloud" bloom
             // -----------------------------------------------------------------
             if (smearAmt > 0.0f && smearTimeSamp > 0.0f) {
                 smearL.push(tailL);
@@ -521,7 +583,7 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
                     sR += kSmearGain[t] * smearR.readFracCubic(dR);
                 }
 
-                // normalization: keep subtle and stable
+                // normalization
                 sL *= 0.20f;
                 sR *= 0.20f;
 
@@ -529,22 +591,37 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
                 tailR = (1.0f - smearAmt) * tailR + smearAmt * (tailR + sR);
             }
             else {
-                // keep smear buffers “warm” but stable if enabled later mid-stream
                 smearL.push(tailL);
                 smearR.push(tailR);
             }
 
-            // Late diffusion
+            // -----------------------------------------------------------------
+            // Step 6: Dynamic late diffusion refinement
+            // - boost late diffusion as tail builds (optional)
+            // -----------------------------------------------------------------
+            float lateAmt = dsp::clampf(target.lateDiffAmount, 0.0f, 1.0f);
+            if (lateBoost > 0.0f) {
+                // Boost more when tail is “filled”; keep bounded
+                float boost = 1.0f + lateBoost * (0.25f + 0.75f * tailEnvSm);
+                lateAmt = dsp::clampf(lateAmt * boost, 0.0f, 1.0f);
+            }
+
             if (target.lateDiffEnable > 0.0001f) {
-                diffusion.processLate(tailL, tailR, dsp::clampf(target.lateDiffAmount, 0.0f, 1.0f));
+                diffusion.processLate(tailL, tailR, lateAmt);
             }
 
             float wetOutL = tailL + eL;
             float wetOutR = tailR + eR;
 
+            // Loudness comp
+            float loudDb = 0.0f;
+            if (target.loudCompEnable > 0.0001f) loudDb = computeLoudnessCompDb(target.decay);
+            const float loudGain = dsp::dbToLin(loudDb);
+
             wetOutL *= loudGain;
             wetOutR *= loudGain;
 
+            // Ducking
             float duckGain = 1.0f;
             if (target.duckEnable > 0.0001f) {
                 const float inMono = 0.5f * (std::abs(inL[pos + i]) + std::abs(inR[pos + i]));

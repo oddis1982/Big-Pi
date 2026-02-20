@@ -88,23 +88,6 @@ public:
         // Kappa+Cloud Mod — Step 4–5 (combined):
         //  Step 4: Cloud-specific delay-line set (Sky)
         //  Step 5: Post-tank micro-smear
-        //
-        // cloudDelaySetEnable:
-        //   0 = use normal delay set from mode family
-        //   1 = Sky uses dedicated Cloud delay-time set
-        //
-        // cloudSmearEnable:
-        //   0 = off
-        //   1 = post-tank stereo micro-smear (light multitap micro-delay)
-        //
-        // cloudSmearAmount:
-        //   0..1 mix amount of smear taps (kept subtle)
-        //
-        // cloudSmearTimeMs:
-        //   base spread of smear taps (typical 6..28 ms)
-        //
-        // cloudSmearWidth:
-        //   stereo offset/time-skew in smear taps (0..1)
         // ---------------------------------------------------------------------
         float cloudDelaySetEnable = 1.0f;
 
@@ -112,6 +95,26 @@ public:
         float cloudSmearAmount = 0.35f;
         float cloudSmearTimeMs = 14.0f;
         float cloudSmearWidth = 0.75f;
+
+        // ---------------------------------------------------------------------
+        // Kappa+Cloud Mod — Step 6: Dynamic diffusion refinement (polish)
+        //
+        // dynDiffEnable:
+        //   enables time-varying diffusion behavior
+        //
+        // dynDiffTailBoost:
+        //   boosts input diffusion as the tank tail builds (0..1)
+        //
+        // dynDiffTransientReduce:
+        //   reduces input diffusion on transients to preserve pick attack (0..1)
+        //
+        // dynDiffLateBoost:
+        //   boosts late diffusion amount as tail builds (0..1)
+        // ---------------------------------------------------------------------
+        float dynDiffEnable = 1.0f;
+        float dynDiffTailBoost = 0.40f;
+        float dynDiffTransientReduce = 0.35f;
+        float dynDiffLateBoost = 0.35f;
 
         float outHpHz = 20.0f;
         float outLowShelfHz = 200.0f;
@@ -176,6 +179,11 @@ private:
     dsp::MultiLFO lfos{};
 
     dsp::EnvelopeFollower duckEnv{};
+
+    // Step 6: dynamic diffusion helpers (RT-safe, no allocations)
+    dsp::EnvelopeFollower diffFast{};
+    dsp::EnvelopeFollower diffSlow{};
+    float tailEnvSm = 0.0f;
 
     // REAL-TIME RULE:
     // These vectors must be sized ONLY in prepare(). processBlock() must not resize.
