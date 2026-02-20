@@ -1,8 +1,8 @@
-﻿﻿﻿﻿// =========================== src/dsp/tail/Tank.h ============================
+﻿// =========================== src/dsp/tail/Tank.h ============================
 #pragma once
 /*
   =============================================================================
-  Tank.h — Big Pi Late Reverb Tank (FDN-like delay network)
+  Tank.h � Big Pi Late Reverb Tank (FDN-like delay network)
   =============================================================================
 
   This module implements the "late reverb": the dense tail after early reflections.
@@ -93,6 +93,21 @@ namespace bigpi::core {
             float jitterRateHz = 0.35f;
             float jitterSmoothMs = 80.0f;
 
+
+            // ------------------------------------------------------------------
+            // Kappa+Cloud Mod (Level 2): Cloudify modulation (spin + wander)
+            // cloudEnable: enables slow spatial drift modulation
+            // cloudSpinHz: global rotation speed (very slow)
+            // cloudWanderAmount: per-line drift amount (0..1, scaled by modDepth)
+            // cloudWanderRateHz: drift noise rate
+            // cloudWanderSmoothMs: drift noise smoothing
+            // ------------------------------------------------------------------
+            float cloudEnable = 0.0f;
+            float cloudSpinHz = 0.045f;
+            float cloudWanderAmount = 0.55f;
+            float cloudWanderRateHz = 0.08f;
+            float cloudWanderSmoothMs = 500.0f;
+
             // Dynamic damping (optional)
             float dynEnable = 1.0f;
             float dynAmount = 0.65f;
@@ -109,14 +124,6 @@ namespace bigpi::core {
 
         Tank() = default;
 
-        /*
-          init(sampleRate, maxDelaySamples, seed)
-          ---------------------------------------
-          Allocates delay line buffers and initializes internal filter/mod helpers.
-
-          - maxDelaySamples must be >= maximum delaySamp you plan to use.
-            (we allocate based on sampleRate and a worst-case max delay time)
-        */
         void init(float sampleRate, int maxDelaySamples, uint32_t seed);
 
         // Flush memory (clear delay lines and filter states)
@@ -132,23 +139,6 @@ namespace bigpi::core {
         // Processing
         // ----------------------------------------------------------------------
 
-        /*
-          processSample(inj, baseDecay, lfoBank, yOut)
-          -------------------------------------------
-          Processes ONE sample through the tank.
-
-          Inputs:
-            inj       : injection sample (mono) that feeds the tank each sample
-            baseDecay : base feedback amount (0..1), before multiband multipliers
-            lfoBank   : MultiLFO used for sinusoidal per-line modulation
-
-          Outputs:
-            yOut[i]   : raw delay line outputs (first cfg.lines values are valid)
-
-          Notes:
-            - Tank does: read -> matrix mix -> filter/decay -> writeback
-            - Engine does: injection creation, tap rendering, diffusion/output stage
-        */
         void processSample(float inj,
             float baseDecay,
             dsp::MultiLFO& lfoBank,
@@ -157,9 +147,8 @@ namespace bigpi::core {
         /*
           processSampleVec(injVec, baseDecay, lfoBank, yOut)
           --------------------------------------------------
-          Kappa+Cloud Mod (Step 1):
-          Same tank processing, but injection is provided per delay line.
-          Only the first cfg.lines values are read.
+          Kappa+Cloud Mod (Step 1): per-line injection vector.
+          Only the first cfg.lines entries are read.
         */
         void processSampleVec(const std::array<float, kMaxLines>& injVec,
             float baseDecay,
@@ -189,6 +178,11 @@ namespace bigpi::core {
         // Jitter modulators (one per line)
         std::array<dsp::SmoothNoise, kMaxLines> jitter{};
 
+        // Kappa+Cloud Mod (Level 2): slow drift modulators
+        std::array<dsp::SmoothNoise, kMaxLines> cloudNoise{};
+        std::array<float, kMaxLines> cloudPhaseOffset{};
+        float cloudPhase = 0.0f;
+
         // Tail energy tracking
         dsp::EnvelopeFollower envFollower{};
         float env01 = 0.0f;
@@ -199,17 +193,12 @@ namespace bigpi::core {
         // ----------------------------------------------------------------------
         // Kappa upgrade: RT60-based decay gains (stable, line-length aware)
         // ----------------------------------------------------------------------
-        // We cache per-line feedback gains computed from a target RT60 (time to
-        // decay by 60 dB). This prevents runaway feedback when "decay multipliers"
-        // are > 1.0, because we treat those multipliers as RT60 scalers (seconds),
-        // not as direct feedback gains.
         float lastDecay01 = -1.0f; // invalid forces a recompute
 
         std::array<float, kMaxLines> fbGainLow{};
         std::array<float, kMaxLines> fbGainMid{};
         std::array<float, kMaxLines> fbGainHigh{};
 
-        // Recompute per-line gains if decay01 changes.
         void updateDecayGains(float decay01);
 
         // Last outputs (debug/inspection; not required for sound)
@@ -218,9 +207,7 @@ namespace bigpi::core {
         // Seed for deterministic variation
         uint32_t seed = 0x12345678u;
 
-        // Compute dynamic damping cutoff based on tank envelope
         float computeDynamicDampingHz(float staticDampHz, float env01Now);
     };
 
 } // namespace bigpi::core
-

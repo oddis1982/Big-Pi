@@ -62,12 +62,27 @@ public:
         float erDampHz = 9000.0f;
         float erWidth = 1.0f;
 
+
         // ---------------------------------------------------------------------
         // Kappa+Cloud Mod (Step 1): decorrelated stereo tank injection depth
         // 0.0 = legacy mono injection (M only)
         // 1.0 = full MS vector injection (S drives a balanced +/- vector)
         // ---------------------------------------------------------------------
         float stereoDepth = 0.0f;
+
+        // ---------------------------------------------------------------------
+        // Kappa+Cloud Mod (Level 2): "Cloudify" modulation controls
+        // cloudEnable: enables slow spatial drift (spin + wander) inside the tank
+        // cloudSpinHz: global rotation rate (very slow, ~0.01..0.20 Hz)
+        // cloudWanderAmount: per-line random drift amount (0..1, scaled by modDepth)
+        // cloudWanderRateHz: rate of the drift noise
+        // cloudWanderSmoothMs: smoothing of the drift noise
+        // ---------------------------------------------------------------------
+        float cloudEnable = 0.0f;
+        float cloudSpinHz = 0.045f;
+        float cloudWanderAmount = 0.55f;
+        float cloudWanderRateHz = 0.08f;
+        float cloudWanderSmoothMs = 500.0f;
 
         float outHpHz = 20.0f;
         float outLowShelfHz = 200.0f;
@@ -113,14 +128,15 @@ private:
     // -------------------------------------------------------------------------
     // Kappa+Cloud Mod (Step 1): MS decorrelated injection vectors
     // vM: uniform distribution (sum = 1)
-    // vS: balanced +/- distribution (sum ≈ 0), shuffled deterministically
+    // vS: balanced +/- distribution (sum ≈ 0), shuffled deterministically per mode
     // injVec: per-line injection fed to Tank::processSampleVec()
     // -------------------------------------------------------------------------
-    std::array<float, bigpi::core::kMaxLines> injVec{};
-    std::array<float, bigpi::core::kMaxLines> vM{};
-    std::array<float, bigpi::core::kMaxLines> vS{};
+    std::array<float, bigpi::core::Tank::kMaxLines> injVec{};
+    std::array<float, bigpi::core::Tank::kMaxLines> vM{};
+    std::array<float, bigpi::core::Tank::kMaxLines> vS{};
     int lastStereoVecN = -1;
     void rebuildStereoVectors(int lines);
+
 
     EarlyReflections er{};
     bigpi::core::Diffusion diffusion{};

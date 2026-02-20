@@ -98,6 +98,7 @@
     <None Include=".gitattributes" />
     <None Include=".gitignore" />
     <None Include="Big Pi.slnx" />
+    <None Include="docs\Checklist.md" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Source\Dsp.h" />

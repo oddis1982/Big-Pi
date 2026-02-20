@@ -9,11 +9,12 @@ static inline float msToSamples(float ms, float sr) {
     return ms * 0.001f * sr;
 }
 
+
 // -----------------------------------------------------------------------------
 // Kappa+Cloud Mod (Step 1): build MS injection vectors for current line count
 // -----------------------------------------------------------------------------
 void ReverbEngine::rebuildStereoVectors(int lines) {
-    lines = std::max(1, std::min(lines, bigpi::core::kMaxLines));
+    lines = std::max(1, std::min(lines, bigpi::core::Tank::kMaxLines));
     if (lines == lastStereoVecN) return;
     lastStereoVecN = lines;
 
@@ -27,7 +28,7 @@ void ReverbEngine::rebuildStereoVectors(int lines) {
     for (int i = 0; i < lines; ++i) vM[i] = invN;
 
     // Deterministic shuffle so each mode has stable decorrelation
-    std::array<int, bigpi::core::kMaxLines> idx{};
+    std::array<int, bigpi::core::Tank::kMaxLines> idx{};
     for (int i = 0; i < lines; ++i) idx[i] = i;
 
     uint32_t x = 0xC10UD00Du ^ (uint32_t(int(target.mode)) * 0x9E3779B9u);
@@ -164,6 +165,13 @@ void ReverbEngine::setParams(const Params& p) {
     tc.jitterRateHz = target.modJitterRateHz;
     tc.jitterSmoothMs = target.modJitterSmoothMs;
 
+    // Kappa+Cloud Mod (Level 2): cloudify modulation controls
+    tc.cloudEnable = target.cloudEnable;
+    tc.cloudSpinHz = target.cloudSpinHz;
+    tc.cloudWanderAmount = target.cloudWanderAmount;
+    tc.cloudWanderRateHz = target.cloudWanderRateHz;
+    tc.cloudWanderSmoothMs = target.cloudWanderSmoothMs;
+
     tank.setConfig(tc);
 }
 
@@ -227,6 +235,18 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
 
     target.erLevel = modeCfg.defaultERLevel;
     target.erSize = modeCfg.defaultERSize;
+
+    // Kappa+Cloud Mod (Level 2): Cloudify defaults
+    if (m == bigpi::Mode::Sky) {
+        target.cloudEnable = 1.0f;
+        target.cloudSpinHz = 0.045f;
+        target.cloudWanderAmount = 0.55f;
+        target.cloudWanderRateHz = 0.08f;
+        target.cloudWanderSmoothMs = 500.0f;
+    }
+    else {
+        target.cloudEnable = 0.0f;
+    }
 
     if (m == bigpi::Mode::Hall) {
         target.fbXoverLoHz = 220.0f;
@@ -300,6 +320,13 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     tc2.jitterRateHz = target.modJitterRateHz;
     tc2.jitterSmoothMs = target.modJitterSmoothMs;
 
+    // Kappa+Cloud Mod (Level 2): cloudify modulation controls
+    tc2.cloudEnable = target.cloudEnable;
+    tc2.cloudSpinHz = target.cloudSpinHz;
+    tc2.cloudWanderAmount = target.cloudWanderAmount;
+    tc2.cloudWanderRateHz = target.cloudWanderRateHz;
+    tc2.cloudWanderSmoothMs = target.cloudWanderSmoothMs;
+
     tc2.fbHpHz = target.feedbackHpHz;
     tc2.dampHz = target.dampingHz;
 
@@ -348,7 +375,7 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
         // Early reflections
         er.processBlock(wetL.data(), wetR.data(), erL.data(), erR.data(), chunk);
 
-        std::array<float, bigpi::core::kMaxLines> yVec{};
+        std::array<float, bigpi::core::Tank::kMaxLines> yVec{};
 
         const float effDecay = computeEffectiveDecay(target.decay, target.freeze);
 
@@ -362,14 +389,6 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
         // Control parameter: set once per chunk (not per-sample)
         diffusion.setTimeVaryingG(target.inputDiffG);
 
-        // Cache tank config once per chunk (avoids repeated getConfig())
-        const auto tc = tank.getConfig();
-
-        // Kappa+Cloud Mod (Step 1): make sure vectors match current tank size
-        rebuildStereoVectors(tc.lines);
-
-        const float gS = dsp::clampf(target.stereoDepth, 0.0f, 1.0f);
-
         for (int i = 0; i < chunk; ++i) {
             const float pL = wetL[i];
             const float pR = wetR[i];
@@ -382,24 +401,23 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
 
             diffusion.processInput(injL, injR);
 
-            // -----------------------------------------------------------------
-            // Kappa+Cloud Mod (Step 1): MS vector injection into tank
-            //
-            // M always feeds uniformly.
-            // S feeds a balanced +/- vector, scaled by StereoDepth.
-            // When input is mono (L==R), S==0 so behavior == legacy mono injection.
-            // -----------------------------------------------------------------
+            // Kappa+Cloud Mod (Step 1): MS decorrelated vector injection into tank
             const float M = 0.5f * (injL + injR);
             const float S = 0.5f * (injL - injR);
 
-            for (int li = 0; li < tc.lines; ++li) {
+            // Ensure vectors match current tank size (safe for runtime mode changes)
+            const auto tcNow = tank.getConfig();
+            rebuildStereoVectors(tcNow.lines);
+
+            const float gS = dsp::clampf(target.stereoDepth, 0.0f, 1.0f);
+            for (int li = 0; li < tcNow.lines; ++li) {
                 injVec[li] = (M * vM[li]) + (S * gS) * vS[li];
             }
 
             tank.processSampleVec(injVec, effDecay, lfos, yVec);
 
             float tailL = 0.0f, tailR = 0.0f;
-            bigpi::core::renderTapPattern(yVec, tc.lines, modeCfg.tank.tapPattern, tailL, tailR);
+            bigpi::core::renderTapPattern(yVec, tcNow.lines, modeCfg.tank.tapPattern, tailL, tailR);
 
             if (target.lateDiffEnable > 0.0001f) {
                 diffusion.processLate(tailL, tailR, dsp::clampf(target.lateDiffAmount, 0.0f, 1.0f));

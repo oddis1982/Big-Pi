@@ -376,3 +376,21 @@ CURRENT POSITION
 	Phase 0 complete
 	Entering Phase 1 tuning
 	MicroCosmos fully specified, not yet implemented
+
+Addendum 1) 19.02.2026
+	Enhance Big Pi tank with:
+
+				Per-line delay modulation (independent depth scaling)
+				Randomized delay offsets at init
+				T60-derived feedback scaling
+				Optional early multitap cloud front-end
+
+						That gives you:
+							-Vintage
+							-Blackhole
+							-Cloud
+							-Cinematic
+							-Ambient
+							-Pad
+							-Infinite
+						All from one core system.
