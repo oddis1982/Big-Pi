@@ -64,8 +64,6 @@ public:
 
         // ---------------------------------------------------------------------
         // Kappa+Cloud Mod — Step 1: decorrelated stereo tank injection depth
-        // 0.0 = legacy mono injection (M only)
-        // 1.0 = full MS vector injection (S drives a balanced +/- vector)
         // ---------------------------------------------------------------------
         float stereoDepth = 0.0f;
 
@@ -80,19 +78,40 @@ public:
 
         // ---------------------------------------------------------------------
         // Kappa+Cloud Mod — Step 3: Cloud front-end multitap "spray"
-        //
-        // This runs BEFORE diffusion/tank injection, producing clustered micro-taps
-        // from the predelay buffer to "cloudify" the input.
-        //
-        // cloudFrontEnable: enables the front-end spray
-        // cloudFrontAmount: mix amount (0..1)
-        // cloudFrontSizeMs: spread of taps in ms (typical 8..60 ms)
-        // cloudFrontWidth: L/R tap offset / stereo spread (0..1)
         // ---------------------------------------------------------------------
         float cloudFrontEnable = 0.0f;
         float cloudFrontAmount = 0.45f;
         float cloudFrontSizeMs = 22.0f;
         float cloudFrontWidth = 0.70f;
+
+        // ---------------------------------------------------------------------
+        // Kappa+Cloud Mod — Step 4–5 (combined):
+        //  Step 4: Cloud-specific delay-line set (Sky)
+        //  Step 5: Post-tank micro-smear
+        //
+        // cloudDelaySetEnable:
+        //   0 = use normal delay set from mode family
+        //   1 = Sky uses dedicated Cloud delay-time set
+        //
+        // cloudSmearEnable:
+        //   0 = off
+        //   1 = post-tank stereo micro-smear (light multitap micro-delay)
+        //
+        // cloudSmearAmount:
+        //   0..1 mix amount of smear taps (kept subtle)
+        //
+        // cloudSmearTimeMs:
+        //   base spread of smear taps (typical 6..28 ms)
+        //
+        // cloudSmearWidth:
+        //   stereo offset/time-skew in smear taps (0..1)
+        // ---------------------------------------------------------------------
+        float cloudDelaySetEnable = 1.0f;
+
+        float cloudSmearEnable = 0.0f;
+        float cloudSmearAmount = 0.35f;
+        float cloudSmearTimeMs = 14.0f;
+        float cloudSmearWidth = 0.75f;
 
         float outHpHz = 20.0f;
         float outLowShelfHz = 200.0f;
@@ -150,6 +169,9 @@ private:
     OutputStage outStage{};
 
     dsp::DelayLine preL{}, preR{};
+
+    // Step 5: post-tank micro-smear buffers (small, RT-safe)
+    dsp::DelayLine smearL{}, smearR{};
 
     dsp::MultiLFO lfos{};
 

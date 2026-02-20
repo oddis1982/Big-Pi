@@ -70,6 +70,11 @@ void ReverbEngine::prepare(float sampleRate, int blockSize) {
     preL.init(preMax);
     preR.init(preMax);
 
+    // Step 5: post-tank smear buffer (micro-delay taps)
+    const int smearMax = std::max(16, int(sr * 0.060f)); // 60 ms
+    smearL.init(smearMax);
+    smearR.init(smearMax);
+
     diffusion.init(sr, 0xB16B00B5u);
 
     lfos.init(16, sr);
@@ -93,6 +98,9 @@ void ReverbEngine::reset() {
 
     preL.clear();
     preR.clear();
+
+    smearL.clear();
+    smearR.clear();
 
     er.reset();
     diffusion.clear();
@@ -162,7 +170,7 @@ void ReverbEngine::setParams(const Params& p) {
     tc.jitterRateHz = target.modJitterRateHz;
     tc.jitterSmoothMs = target.modJitterSmoothMs;
 
-    // Kappa+Cloud Mod (Level 2): cloudify modulation controls
+    // Cloudify modulation controls
     tc.cloudEnable = target.cloudEnable;
     tc.cloudSpinHz = target.cloudSpinHz;
     tc.cloudWanderAmount = target.cloudWanderAmount;
@@ -178,13 +186,14 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     bigpi::core::Tank::Config tc = tank.getConfig();
     tc.lines = modeCfg.tank.delayLines;
 
-    // Kappa+Cloud Mod (Step 1): ensure vectors match tank line count
+    // ensure vectors match tank line count
     rebuildStereoVectors(tc.lines);
 
     tc.matrix = modeCfg.tank.useHouseholder
         ? bigpi::core::MatrixType::Householder
         : bigpi::core::MatrixType::Hadamard;
 
+    // Base delay sets (ms)
     static const float baseMs16_Default[16] = {
       29.7f, 37.1f, 41.1f, 43.7f,
       53.9f, 59.5f, 61.7f, 71.3f,
@@ -199,8 +208,24 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
       109.7f, 117.1f, 125.9f, 137.3f
     };
 
+    // Step 4: Cloud delay-line set (designed to be more "de-correlated" and less clustered)
+    // - avoids near-harmonic groupings
+    // - spreads energy more evenly across a wider window
+    // - still sits in a plausible late-reverb range
+    static const float baseMs16_Cloud[16] = {
+      27.9f, 33.6f, 39.2f, 44.9f,
+      51.7f, 57.4f, 63.8f, 70.9f,
+      78.1f, 86.6f, 95.8f, 104.7f,
+      114.3f, 124.9f, 136.8f, 149.7f
+    };
+
     const float* baseSet = baseMs16_Default;
     if (m == bigpi::Mode::Hall) baseSet = baseMs16_Hall;
+
+    // If Sky and enabled, use Cloud delay set.
+    if (m == bigpi::Mode::Sky && target.cloudDelaySetEnable > 0.0001f) {
+        baseSet = baseMs16_Cloud;
+    }
 
     for (int i = 0; i < 16; ++i) {
         const float ms = baseSet[i] * modeCfg.tank.delayScale;
@@ -233,7 +258,7 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     target.erLevel = modeCfg.defaultERLevel;
     target.erSize = modeCfg.defaultERSize;
 
-    // Kappa+Cloud Mod (Level 2): Cloudify defaults
+    // Cloudify defaults (Sky)
     if (m == bigpi::Mode::Sky) {
         target.cloudEnable = 1.0f;
         target.cloudSpinHz = 0.045f;
@@ -245,7 +270,7 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
         target.cloudEnable = 0.0f;
     }
 
-    // Kappa+Cloud Mod (Step 3): Cloud front-end multitap defaults
+    // Step 3 defaults (Sky)
     if (m == bigpi::Mode::Sky) {
         target.cloudFrontEnable = 1.0f;
         target.cloudFrontAmount = 0.48f;
@@ -256,31 +281,20 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
         target.cloudFrontEnable = 0.0f;
     }
 
-    if (m == bigpi::Mode::Hall) {
-        target.fbXoverLoHz = 220.0f;
-        target.fbXoverHiHz = 3800.0f;
+    // Step 4–5 defaults (Sky)
+    if (m == bigpi::Mode::Sky) {
+        target.cloudDelaySetEnable = 1.0f;
 
-        target.erDampHz = 8500.0f;
-        target.erWidth = 1.20f;
-
-        target.modJitterEnable = 1.0f;
-        target.modJitterAmount = 0.25f;
-        target.modJitterRateHz = 0.30f;
-        target.modJitterSmoothMs = 90.0f;
-
-        target.outHpHz = 22.0f;
-
-        target.outLowShelfHz = 180.0f;
-        target.outLowGainDb = +1.0f;
-
-        target.outHighShelfHz = 7000.0f;
-        target.outHighGainDb = -1.5f;
-
-        target.outWidth = 1.15f;
-        target.outDrive = 0.0f;
+        target.cloudSmearEnable = 1.0f;
+        target.cloudSmearAmount = 0.34f;
+        target.cloudSmearTimeMs = 14.0f;
+        target.cloudSmearWidth = 0.80f;
+    }
+    else {
+        target.cloudSmearEnable = 0.0f;
     }
 
-    // Push configs NOW so mode switches take effect immediately
+    // Push configs now
     tank.setConfig(tc);
 
     EarlyReflections::Params erp;
@@ -311,7 +325,7 @@ void ReverbEngine::applyModePreset(bigpi::Mode m) {
     lateCfg.maxG = target.lateDiffMaxG;
     diffusion.setLateConfig(lateCfg);
 
-    // Ensure tank config includes the non-preset owned fields too
+    // Ensure tank config includes non-preset-owned fields too
     bigpi::core::Tank::Config tc2 = tank.getConfig();
     tc2.xoverLoHz = target.fbXoverLoHz;
     tc2.xoverHiHz = target.fbXoverHiHz;
@@ -364,7 +378,6 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
     if (n <= 0) return;
 
     // Step 3: Cloud front-end multitap pattern (fixed, RT-safe)
-    // Normalized offsets (0..1) scaled by cloudFrontSizeMs.
     static constexpr int kCloudTaps = 8;
     static constexpr float kTapPos[kCloudTaps] = {
         0.06f, 0.12f, 0.20f, 0.31f, 0.45f, 0.62f, 0.80f, 1.00f
@@ -372,13 +385,16 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
     static constexpr float kTapGain[kCloudTaps] = {
         0.90f, 0.78f, 0.66f, 0.56f, 0.48f, 0.40f, 0.34f, 0.28f
     };
-    // Alternate stereo signs for small L/R offsets (creates width without hard panning).
     static constexpr float kTapSign[kCloudTaps] = {
         +1.0f, -1.0f, +1.0f, -1.0f, +1.0f, -1.0f, +1.0f, -1.0f
     };
 
-    // Real-time safety: never resize buffers here.
-    // If n > block (allocated in prepare), process in chunks.
+    // Step 5: post-tank smear taps (fixed pattern)
+    static constexpr int kSmearTaps = 6;
+    static constexpr float kSmearPos[kSmearTaps] = { 0.15f, 0.28f, 0.42f, 0.58f, 0.76f, 1.00f };
+    static constexpr float kSmearGain[kSmearTaps] = { 0.88f, 0.70f, 0.56f, 0.45f, 0.36f, 0.30f };
+    static constexpr float kSmearSign[kSmearTaps] = { +1.0f, -1.0f, +1.0f, -1.0f, +1.0f, -1.0f };
+
     int pos = 0;
     while (pos < n) {
         const int chunk = std::min(block, n - pos);
@@ -414,16 +430,20 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
         const auto tcNow = tank.getConfig();
         rebuildStereoVectors(tcNow.lines);
 
-        // Cache a few controls
         const float gS = dsp::clampf(target.stereoDepth, 0.0f, 1.0f);
 
         const float cfEnable = (target.cloudFrontEnable > 0.0001f) ? 1.0f : 0.0f;
         const float cfAmt = dsp::clampf(target.cloudFrontAmount, 0.0f, 1.0f) * cfEnable;
         const float cfSizeSamp = msToSamples(dsp::clampf(target.cloudFrontSizeMs, 0.0f, 120.0f), sr);
         const float cfWidth = dsp::clampf(target.cloudFrontWidth, 0.0f, 1.0f);
-
-        // Convert width into a small time skew (samples). Keep subtle to avoid combiness.
         const float widthSkewSamp = cfWidth * msToSamples(0.45f, sr); // up to ~0.45 ms
+
+        // Step 5 controls (cache per chunk)
+        const float smearOn = (target.cloudSmearEnable > 0.0001f) ? 1.0f : 0.0f;
+        const float smearAmt = dsp::clampf(target.cloudSmearAmount, 0.0f, 1.0f) * smearOn;
+        const float smearTimeSamp = msToSamples(dsp::clampf(target.cloudSmearTimeMs, 0.0f, 60.0f), sr);
+        const float smearWidth = dsp::clampf(target.cloudSmearWidth, 0.0f, 1.0f);
+        const float smearSkewSamp = smearWidth * msToSamples(0.60f, sr); // up to ~0.6 ms
 
         for (int i = 0; i < chunk; ++i) {
             const float pL = wetL[i];
@@ -432,16 +452,11 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
             const float eL = erL[i];
             const float eR = erR[i];
 
-            // -----------------------------------------------------------------
-            // Step 3: Cloud front-end multitap "spray" from the predelay buffer
-            // We read additional micro-taps around the predelay point.
-            // -----------------------------------------------------------------
+            // Step 3: Cloud front-end multitap spray from predelay buffer
             float sprayL = 0.0f;
             float sprayR = 0.0f;
 
             if (cfAmt > 0.0f && cfSizeSamp > 0.0f) {
-                // "Center" taps at the predelay read point; spread backward in time.
-                // (Older samples are larger delay values.)
                 for (int t = 0; t < kCloudTaps; ++t) {
                     const float dt = kTapPos[t] * cfSizeSamp;
                     const float sign = kTapSign[t];
@@ -457,13 +472,12 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
                     sprayR += kTapGain[t] * tapR;
                 }
 
-                // Keep spray level controlled (avoid big level jumps).
-                // 0.22 is a conservative normalization for 8 taps with those gains.
+                // conservative normalization
                 sprayL *= 0.22f;
                 sprayR *= 0.22f;
             }
 
-            // Build injection (predelay + ER + cloud spray)
+            // Build injection
             float injL = pL + eL * 0.65f + cfAmt * sprayL;
             float injR = pR + eR * 0.65f + cfAmt * sprayR;
 
@@ -482,6 +496,45 @@ void ReverbEngine::processBlock(const float* inL, const float* inR,
             float tailL = 0.0f, tailR = 0.0f;
             bigpi::core::renderTapPattern(yVec, tcNow.lines, modeCfg.tank.tapPattern, tailL, tailR);
 
+            // -----------------------------------------------------------------
+            // Step 5: Optional post-tank micro-smear
+            // - push current tail into a short buffer
+            // - read a few micro-taps and mix back in
+            // - placed before late diffusion for a smoother "cloud" bloom
+            // -----------------------------------------------------------------
+            if (smearAmt > 0.0f && smearTimeSamp > 0.0f) {
+                smearL.push(tailL);
+                smearR.push(tailR);
+
+                float sL = 0.0f;
+                float sR = 0.0f;
+
+                for (int t = 0; t < kSmearTaps; ++t) {
+                    const float dt = kSmearPos[t] * smearTimeSamp;
+                    const float sign = kSmearSign[t];
+                    const float skew = sign * smearSkewSamp;
+
+                    const float dL = std::max(1.0f, dt + skew);
+                    const float dR = std::max(1.0f, dt - skew);
+
+                    sL += kSmearGain[t] * smearL.readFracCubic(dL);
+                    sR += kSmearGain[t] * smearR.readFracCubic(dR);
+                }
+
+                // normalization: keep subtle and stable
+                sL *= 0.20f;
+                sR *= 0.20f;
+
+                tailL = (1.0f - smearAmt) * tailL + smearAmt * (tailL + sL);
+                tailR = (1.0f - smearAmt) * tailR + smearAmt * (tailR + sR);
+            }
+            else {
+                // keep smear buffers “warm” but stable if enabled later mid-stream
+                smearL.push(tailL);
+                smearR.push(tailR);
+            }
+
+            // Late diffusion
             if (target.lateDiffEnable > 0.0001f) {
                 diffusion.processLate(tailL, tailR, dsp::clampf(target.lateDiffAmount, 0.0f, 1.0f));
             }
