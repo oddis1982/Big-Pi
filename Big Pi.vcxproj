@@ -75,6 +75,7 @@
   <ImportGroup Label="PropertySheets" />
   <PropertyGroup Label="UserMacros" />
   <ItemGroup>
+    <ClCompile Include="apps\gui_tuner\main (1).cpp" />
     <ClCompile Include="apps\pedal_host\main.cpp" />
     <ClCompile Include="App\main.cpp" />
     <ClCompile Include="Source\EarlyReflections.cpp" />
@@ -99,6 +100,7 @@
     <None Include=".gitignore" />
     <None Include="Big Pi.slnx" />
     <None Include="docs\Checklist.md" />
+    <None Include="docs\Orchestra-mode_master-specV1.0.pdf" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Source\Dsp.h" />
@@ -126,7 +128,9 @@
   </ItemGroup>
   <ItemGroup>
     <Text Include="CMakeLists.txt" />
+    <Text Include="docs\Kappa+Cloud_Mod.txt" />
     <Text Include="Docs\Manifest.txt" />
+    <Text Include="docs\README_TUNER_GUI.txt" />
     <Text Include="Docs\RoadMap.txt" />
     <Text Include="LICENSE.txt" />
   </ItemGroup>

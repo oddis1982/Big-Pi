@@ -1,0 +1,272 @@
+﻿Kappa+Cloud Mod (Big Pi)
+=======================
+
+Version: Kappa+Cloud Mod (hybridization pass)
+Scope: Big Pi late-reverb engine + Cloud-mode hybrid features
+
+This document describes what the Kappa+Cloud Mod adds to Big Pi, what it changes in the signal flow,
+and how to tune and verify the new behavior. It is intended to live in `docs/Kappa+Cloud_Mod.txt`.
+
+
+Overview
+--------
+
+Kappa+Cloud Mod hybridizes Big Pi’s existing FDN-style late reverb tank with a “Cloud” character layer.
+The goal is a wider, less correlated, more “holographic” stereo field, with optional cloud-like smear,
+while preserving pick attack and musical dynamics.
+
+Implementation order:
+
+1. Stereo injection vectors
+2. Spin/Wander modulation (cloudify the modulation field)
+3. Cloud front-end multitap mode (input spray)
+4. Cloud delay-line set (Sky/Cloud mode uses alternate delay times)
+5. Optional post-tank smear (micro-smear stage)
+6. Dynamic diffusion refinement (later polish)
+
+
+High-level DSP Signal Flow
+--------------------------
+
+Baseline Big Pi (conceptual):
+    Input -> Predelay -> Early Reflections -> Input Diffusion -> Tank (FDN) -> Tap Render -> Late Diffusion -> Output Stage -> Mix
+
+Kappa+Cloud Mod additions / changes:
+    Input -> Predelay -> (Cloud Front-end Spray) -> Early Reflections -> Dynamic Input Diffusion ->
+    Decorrelated Stereo Injection (per-line vector) -> Tank (FDN, optional Cloud delay set, optional Cloud modulation field) ->
+    Tap Render -> Optional Post-Tank Smear -> Dynamic Late Diffusion -> Output Stage -> Mix
+
+
+What the Mod Adds
+-----------------
+
+A) Decorrelated Stereo Tank Injection (StereoDepth)
+--------------------------------------------------
+
+Problem addressed:
+- Traditional stereo reverbs often inject L/R or M only into the tank, leading to correlated tails and a narrow stereo image.
+
+Solution:
+- Build two per-line injection vectors:
+  - vM: uniform “mid” injection (sum = 1.0)
+  - vS: balanced “side” injection (sum ≈ 0), deterministically shuffled per mode for stable decorrelation
+- Construct per-line injection:
+      injVec[i] = (M * vM[i]) + (S * StereoDepth) * vS[i]
+  where:
+      M = 0.5*(L+R),  S = 0.5*(L-R)
+
+Parameter:
+- StereoDepth (0..1):
+  - 0.0: legacy mono injection (mid only)
+  - 1.0: full MS decorrelated injection into the tank
+
+Result:
+- Wider, more stable stereo image with reduced mono-like “collapse” in the tail.
+- Works for 8 or 16 tank lines (vectors rebuild to match line count).
+
+
+B) Cloudify Modulation: Spin + Wander
+-------------------------------------
+
+Problem addressed:
+- Standard per-line LFO modulation can feel periodic and “chorusy” rather than cloud-like.
+
+Solution:
+- Add a slow rotating phase-field (“spin”) + per-line smoothed random drift (“wander”).
+- When Cloudify is enabled, modulation is driven by:
+  - lfo = sin(global_phase + per_line_phase_offset)
+  - wander = per-line smooth noise
+  - jitter (existing) can still add micro-randomness depending on settings.
+
+Parameters (tank-side):
+- cloudEnable (0..1)
+- cloudSpinHz (very slow, typical 0.01..0.20 Hz)
+- cloudWanderAmount (scaled by modDepth)
+- cloudWanderRateHz (slow noise rate)
+- cloudWanderSmoothMs (noise smoothing)
+
+Result:
+- “Breathing” motion in the tail without obvious periodicity.
+- More spatial “drift” and less static combiness.
+
+
+C) Cloud Front-end Multitap “Spray”
+-----------------------------------
+
+Problem addressed:
+- A single injection point (even with diffusion) can sound like one “hit” entering the tank.
+
+Solution:
+- Use the predelay buffer as a source for several short micro-taps clustered around the predelay read position.
+- These taps are lightly summed back into the injection path, with subtle stereo time-skews.
+
+Parameters:
+- cloudFrontEnable (0..1)
+- cloudFrontAmount (0..1): how much spray to add
+- cloudFrontSizeMs: tap spread window (typical 8..60 ms)
+- cloudFrontWidth (0..1): stereo offset/time-skew for width
+
+Result:
+- Denser initial cloud texture, especially on percussive input.
+- A “sprayed” entrance that feels more like granular/ambient diffusion, without a full granular engine.
+
+
+D) Cloud Delay-Line Set (Sky mode)
+----------------------------------
+
+Problem addressed:
+- A single delay-time family can produce recognizable resonances and clustering in some modes.
+
+Solution:
+- For Sky/Cloud mode, optionally substitute a dedicated 16-line delay-time set designed to reduce clustering.
+
+Parameter:
+- cloudDelaySetEnable (0..1): when enabled and in Sky mode, uses the Cloud delay-time set.
+
+Result:
+- A smoother, more “spread” late field in Cloud mode.
+- Reduced tendency for pitch-ish ringing on some material.
+
+
+E) Optional Post-Tank Micro-Smear
+---------------------------------
+
+Problem addressed:
+- Even with diffusion + modulation, some material benefits from a tiny post-render blur to smooth the tail texture.
+
+Solution:
+- After tap rendering (L/R), run an optional short stereo micro-smear stage:
+  - push tail L/R into short smear buffers
+  - read a few micro-taps (few ms to a few tens of ms)
+  - mix back in subtly
+- Placed before late diffusion so the late diffuser can “finalize” the blurred texture.
+
+Parameters:
+- cloudSmearEnable (0..1)
+- cloudSmearAmount (0..1): smear mix
+- cloudSmearTimeMs: spread of smear taps (typical 6..28 ms)
+- cloudSmearWidth (0..1): stereo time-skew for smear taps
+
+Result:
+- Smoother, more “misty” cloud tail.
+- Helps hide residual comb-like artifacts while keeping the overall decay shape.
+
+
+F) Dynamic Diffusion Refinement (Polish)
+----------------------------------------
+
+Problem addressed:
+- A fixed diffusion amount can either blur transients too much, or leave tails too structured.
+
+Solution:
+- Make diffusion context-aware:
+  1) Transient detection:
+     - fast envelope minus slow envelope on the injection signal
+     - reduces input diffusion on sharp attacks to preserve articulation
+  2) Tail-energy tracking:
+     - uses the tank’s envelope proxy (tank.getEnv01()) to boost diffusion as the tail densifies
+  3) Late diffusion boost (optional):
+     - increases late diffusion amount as tail builds, within safe bounds
+
+Parameters:
+- dynDiffEnable (0..1)
+- dynDiffTailBoost (0..1)
+- dynDiffTransientReduce (0..1)
+- dynDiffLateBoost (0..1)
+
+Result:
+- Cleaner pick attack with a tail that “blooms” into density.
+- Diffuse when needed, clear when needed.
+
+
+Recommended Defaults / Starting Points
+--------------------------------------
+
+For Cloud (Sky) mode:
+- StereoDepth: 0.6–1.0 (try 0.85)
+- cloudEnable: 1
+  - cloudSpinHz: ~0.03–0.07
+  - cloudWanderAmount: ~0.4–0.7
+  - cloudWanderRateHz: ~0.05–0.12
+  - cloudWanderSmoothMs: ~300–800
+- cloudFrontEnable: 1
+  - cloudFrontAmount: ~0.3–0.6
+  - cloudFrontSizeMs: ~18–35
+  - cloudFrontWidth: ~0.6–0.9
+- cloudDelaySetEnable: 1
+- cloudSmearEnable: 1 (optional)
+  - cloudSmearAmount: ~0.2–0.5
+  - cloudSmearTimeMs: ~10–18
+  - cloudSmearWidth: ~0.6–0.9
+- dynDiffEnable: 1
+  - dynDiffTailBoost: ~0.3–0.6
+  - dynDiffTransientReduce: ~0.2–0.5
+  - dynDiffLateBoost: ~0.2–0.6
+
+For non-Cloud modes:
+- StereoDepth: 0.1–0.5 (subtle widening)
+- Cloudify/front/smear: typically off
+- dynDiff: on but subtle (tailBoost/transReduce/lateBoost ~0.15–0.30)
+
+
+Testing / Verification Checklist
+--------------------------------
+
+1) Stereo field:
+- StereoDepth = 0 should sound like legacy (mostly mid-injected).
+- StereoDepth = 1 should sound noticeably wider, with less L/R correlation in the tail.
+
+2) Cloudify modulation:
+- Enable cloudEnable and listen for slow “drift” rather than periodic wobble.
+- Increase cloudSpinHz slightly if motion is too static.
+
+3) Front-end spray:
+- Enable cloudFrontEnable and raise cloudFrontAmount.
+- You should hear more immediate density and “air” on percussive hits.
+
+4) Cloud delay set:
+- A/B cloudDelaySetEnable in Sky mode.
+- The cloud set should feel smoother and less pitchy.
+
+5) Post-tank smear:
+- A/B cloudSmearEnable.
+- With smear on, tail should become slightly more “misty,” not obviously delayed/echoed.
+
+6) Dynamic diffusion:
+- On strong pick attacks, the first ~20–80 ms should remain clearer.
+- Sustained notes should become progressively smoother as the tail builds.
+
+
+Performance / Real-time Safety
+------------------------------
+
+- All buffers are allocated during prepare()/init().
+- No resizing or heap allocation occurs in processBlock()/per-sample processing.
+- Added cost in Cloud mode is a small number of extra delay reads (spray + smear) and envelope math.
+- Designed to remain within Raspberry Pi 5 capability at 48 kHz.
+
+
+Developer Touchpoints
+---------------------
+
+Primary integration points:
+- ReverbEngine:
+  - MS injection vector build + StereoDepth
+  - Cloud front-end spray (predelay-based multitap)
+  - Cloud delay set selection (Sky)
+  - Post-tank smear buffers/taps
+  - Dynamic diffusion refinement (input g + late diffusion amount shaping)
+
+- Tank:
+  - processSampleVec() entrypoint (per-line injection)
+  - cloud modulation controls: cloudEnable, cloudSpinHz, cloudWander*
+
+If you change tank line count (8/16), ensure:
+- vectors rebuild correctly
+- delay sets define enough entries (up to 16; unused entries are ignored if lines < 16)
+
+
+End
+---
+Kappa+Cloud Mod completes the hybridization of Big Pi with a Cloud-style ambient layer while preserving
+playability and real-time constraints.
